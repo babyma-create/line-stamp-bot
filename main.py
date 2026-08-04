@@ -8,13 +8,13 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
+    MessagingApiBlob,
     ReplyMessageRequest,
-    PushMessageRequest,
     TextMessage,
     FlexMessage,
     FlexContainer
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, PostbackEvent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageContent, PostbackEvent
 
 app = Flask(__name__)
 
@@ -139,7 +139,21 @@ def callback():
 
     return 'OK'
 
-# --- 1. メッセージを受信した時の処理 ---
+# --- 1. ファイル（PDF）を受信した時の処理 ---
+@handler.add(MessageEvent, message=FileMessageContent)
+def handle_file(event):
+    # 送信されたファイルのデータをLINEサーバーから取得して一時保存
+    message_id = event.message.id
+    user_id = event.source.user_id
+    save_path = f"/tmp/latest_{user_id}.pdf"
+
+    with ApiClient(configuration) as api_client:
+        line_bot_blob_api = MessagingApiBlob(api_client)
+        content = line_bot_blob_api.get_message_content(message_id)
+        with open(save_path, 'wb') as f:
+            f.write(content)
+
+# --- 2. テキストメッセージを受信した時の処理 ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_msg = event.message.text.strip()
@@ -162,14 +176,19 @@ def handle_message(event):
             )
         )
 
-# --- 2. 「承諾する」ボタンが押された時の処理 ---
+# --- 3. 「承諾する」ボタンが押された時の処理 ---
 @handler.add(PostbackEvent)
 def handle_postback(event):
     data = event.postback.data
 
     if data == "action=approve":
-        input_pdf = "sample_record.pdf"
         user_id = event.source.user_id
+        input_pdf = f"/tmp/latest_{user_id}.pdf"
+        
+        # 受信した個別PDFが存在しない場合はサンプルを代替使用
+        if not os.path.exists(input_pdf):
+            input_pdf = "sample_record.pdf"
+
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
 
@@ -177,7 +196,9 @@ def handle_postback(event):
             user_name = "保護者 様"
             add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name, line_user_id=user_id)
             
-            download_url = f"https://line-stamp-bot-y4g2.onrender.com/files/{output_filename}"
+            # ドメイン名を取得して動的URLを生成
+            host_url = request.host_url.rstrip('/')
+            download_url = f"{host_url}/files/{output_filename}"
             reply_text = f"ご承諾ありがとうございます！\n自動押印（電子承認）が完了しました。\n\n【押印済みPDFの確認URL】\n{download_url}"
 
         except Exception as e:
