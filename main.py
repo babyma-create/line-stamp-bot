@@ -54,7 +54,6 @@ def get_gspread_client():
 # --- スプレッドシートへユーザーリストを読み書き（永久保存） ---
 def get_user_list():
     users = {}
-    # 1. まずローカルファイルを読み込み
     if os.path.exists(USER_LIST_FILE):
         try:
             with open(USER_LIST_FILE, "r") as f:
@@ -62,7 +61,6 @@ def get_user_list():
         except:
             users = {}
 
-    # 2. スプレッドシートの Users シートから復元
     client = get_gspread_client()
     if client:
         try:
@@ -70,7 +68,7 @@ def get_user_list():
             try:
                 sheet = sh.worksheet("Users")
             except:
-                sheet = sh.add_worksheet(title="Users", rows=100, cols=5)
+                sheet = sh.add_worksheet(title="Users", rows=500, cols=5)
                 sheet.append_row(["User_ID", "Name", "Last_Seen"])
 
             records = sheet.get_all_records()
@@ -82,7 +80,7 @@ def get_user_list():
                         "last_seen": r.get("Last_Seen", "")
                     }
         except Exception as e:
-            print(f"User list fetch from sheet error: {e}")
+            print(f"User list fetch error: {e}")
 
     return users
 
@@ -96,14 +94,12 @@ def save_user_id(user_id, display_name=""):
         "name": name
     }
 
-    # ローカル保存
     try:
         with open(USER_LIST_FILE, "w") as f:
             json.dump(users, f, ensure_ascii=False)
     except:
         pass
 
-    # スプレッドシート保存
     client = get_gspread_client()
     if client:
         try:
@@ -111,22 +107,26 @@ def save_user_id(user_id, display_name=""):
             try:
                 sheet = sh.worksheet("Users")
             except:
-                sheet = sh.add_worksheet(title="Users", rows=100, cols=5)
+                sheet = sh.add_worksheet(title="Users", rows=500, cols=5)
                 sheet.append_row(["User_ID", "Name", "Last_Seen"])
 
-            cell = sheet.find(user_id)
+            cell = None
+            try:
+                cell = sheet.find(user_id)
+            except:
+                cell = None
+
             if cell:
                 sheet.update_cell(cell.row, 2, name)
                 sheet.update_cell(cell.row, 3, now_str)
             else:
                 sheet.append_row([user_id, name, now_str])
         except Exception as e:
-            print(f"User save to sheet error: {e}")
+            print(f"User save error: {e}")
 
 # --- Google ドライブへのPDFアップロード＆スプレッドシートログ記録 ---
 def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
     if not SERVICE_ACCOUNT_JSON:
-        print("GOOGLE_SERVICE_ACCOUNT_JSONの設定が不足しています。")
         return False
         
     try:
@@ -138,7 +138,6 @@ def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
         creds = Credentials.from_service_account_info(info, scopes=scopes)
         
         drive_link = ""
-        # 1. Google ドライブへPDFを自動アップロード
         if DRIVE_FOLDER_ID:
             drive_service = build('drive', 'v3', credentials=creds)
             file_metadata = {
@@ -153,7 +152,6 @@ def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
             ).execute()
             drive_link = uploaded_file.get('webViewLink', '')
 
-        # 2. スプレッドシートへログ記録
         if SPREADSHEET_ID:
             client = gspread.authorize(creds)
             sheet = client.open_by_key(SPREADSHEET_ID).sheet1
@@ -162,7 +160,7 @@ def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
             
         return True
     except Exception as e:
-        print(f"ログ・ドライブ保存エラー: {str(e)}")
+        print(f"Drive/Sheet Log Error: {e}")
         return False
 
 def create_approval_card():
@@ -331,7 +329,7 @@ ADMIN_HTML = """
             <select id="user_select" onchange="updateUserId(this.value);" required>
                 <option value="">-- 送信先の保護者を選択してください --</option>
                 {% for uid, info in users.items() %}
-                    <option value="{{ uid }}">{{ info.name }} 様 (ID: {{ uid[:8] }}... / 最終アクセス: {{ info.last_seen }})</option>
+                    <option value="{{ uid }}">{{ info.name }} 様 (最終更新: {{ info.last_seen }})</option>
                 {% endfor %}
             </select>
 
@@ -409,35 +407,19 @@ def handle_file(event):
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_id = event.source.user_id
-    user_msg = event.message.text.strip()
     
     display_name = ""
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             profile = line_bot_api.get_profile(user_id)
-            if profile:
+            if profile and profile.display_name:
                 display_name = profile.display_name
     except:
         pass
 
+    # メッセージが来たら自動でLINE IDと表示名をスプレッドシートに保存
     save_user_id(user_id, display_name)
-    
-    if "出席内容" in user_msg:
-        reply_obj = create_approval_card()
-    else:
-        reply_obj = TextMessage(
-            text="メッセージありがとうございます。\nただいま個別のお問い合わせは手動で確認しております。お時間をいただきますが少しお待ちください。"
-        )
-
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[reply_obj]
-            )
-        )
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
@@ -466,10 +448,7 @@ def handle_postback(event):
         save_user_id(user_id, user_name)
 
         try:
-            # 1. 印鑑（【 承 認 】）＆ 枠外3行ログの挿入処理
             add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name)
-            
-            # 2. 改ざん防止用：Googleドライブ保存＆スプレッドシートログ記録
             log_approval_and_upload_pdf(user_id, user_name, output_pdf, output_filename)
             
             host_url = request.host_url.rstrip('/')
