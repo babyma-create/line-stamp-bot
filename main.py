@@ -95,13 +95,26 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     doc = fitz.open(input_pdf_path)
     page = doc[0]
 
-    # 右上エリアに配置
-    STAMP_X = 480.0
-    STAMP_Y = 40.0
-    WIDTH = 65.0
-    HEIGHT = 30.0
+    # ページの高さと幅を取得（単位: ポイント / 1pt ≒ 0.3528mm）
+    page_width = page.rect.width
+    page_height = page.rect.height
 
-    rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
+    # 単位換算: 1mm ≒ 2.83465 pt
+    mm_to_pt = 2.83465
+
+    # 右端から5mm、下から7cm（70mm）の位置を計算
+    right_margin_pt = 5.0 * mm_to_pt   # 5mm
+    bottom_margin_pt = 70.0 * mm_to_pt # 70mm (7cm)
+
+    # 朱色枠のサイズ（幅約20mm、高さ約10mm）
+    stamp_width = 20.0 * mm_to_pt
+    stamp_height = 10.0 * mm_to_pt
+
+    # 枠の左上X・Y座標
+    STAMP_X = page_width - right_margin_pt - stamp_width - 80.0  # 右側のテキストが入るよう調整
+    STAMP_Y = page_height - bottom_margin_pt - stamp_height
+
+    rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + stamp_width, STAMP_Y + stamp_height)
     stamp_color = (0.9, 0.1, 0.1)  # 朱色
 
     # 四角い枠線を描画
@@ -114,7 +127,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     page.insert_textbox(
         rect,
         "【 承 認 】",
-        fontsize=8.5,
+        fontsize=8.0,
         fontname="japan",
         color=stamp_color,
         align=fitz.TEXT_ALIGN_CENTER
@@ -126,9 +139,9 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     time_str = now.strftime("%H:%M")
 
     # 枠の右側にテキストを配置
-    start_x = STAMP_X + WIDTH + 8
-    start_y = STAMP_Y + 6
-    line_height = 8.5
+    start_x = STAMP_X + stamp_width + 6.0
+    start_y = STAMP_Y + 2.0
+    line_height = 8.0
 
     lines = [
         f"承認者: {user_name}",
