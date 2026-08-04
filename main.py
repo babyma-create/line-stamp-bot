@@ -17,7 +17,6 @@ from linebot.v3.messaging import (
     FlexContainer
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageContent, PostbackEvent
-import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -26,140 +25,44 @@ app = Flask(__name__)
 
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID')
 SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
 
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
-USER_LIST_FILE = "/tmp/user_list.json"
 JST = timezone(timedelta(hours=9))
 
-def get_gspread_client():
-    if not SERVICE_ACCOUNT_JSON or not SPREADSHEET_ID:
-        return None
+# --- Google ドライブへのPDFアップロード（タイムスタンプ＆改ざん不能な履歴付き） ---
+def upload_approved_pdf_to_drive(user_name, local_pdf_path, filename):
+    if not SERVICE_ACCOUNT_JSON or not DRIVE_FOLDER_ID:
+        return ""
     try:
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        info = json.loads(SERVICE_ACCOUNT_JSON)
-        creds = Credentials.from_service_account_info(info, scopes=scopes)
-        return gspread.authorize(creds)
-    except Exception as e:
-        print(f"Gspread Auth Error: {e}")
-        return None
-
-# --- スプレッドシートへユーザーリストを読み書き（永久保存） ---
-def get_user_list():
-    users = {}
-    if os.path.exists(USER_LIST_FILE):
-        try:
-            with open(USER_LIST_FILE, "r") as f:
-                users = json.load(f)
-        except:
-            users = {}
-    
-    client = get_gspread_client()
-    if client:
-        try:
-            sh = client.open_by_key(SPREADSHEET_ID)
-            try:
-                sheet = sh.worksheet("Users")
-            except:
-                sheet = sh.add_worksheet(title="Users", rows=500, cols=5)
-                sheet.append_row(["User_ID", "Name", "Last_Seen"])
-            
-            records = sheet.get_all_records()
-            for r in records:
-                uid = str(r.get("User_ID", "")).strip()
-                if uid:
-                    users[uid] = {
-                        "name": r.get("Name", "保護者"),
-                        "last_seen": r.get("Last_Seen", "")
-                    }
-        except Exception as e:
-            print(f"User list fetch error: {e}")
-            
-    return users
-
-def save_user_id(user_id, display_name=""):
-    users = get_user_list()
-    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    name = display_name or users.get(user_id, {}).get("name", "保護者")
-    users[user_id] = {
-        "last_seen": now_str,
-        "name": name
-    }
-    
-    try:
-        with open(USER_LIST_FILE, "w") as f:
-            json.dump(users, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"Local save error: {e}")
-
-    client = get_gspread_client()
-    if client:
-        try:
-            sh = client.open_by_key(SPREADSHEET_ID)
-            try:
-                sheet = sh.worksheet("Users")
-            except:
-                sheet = sh.add_worksheet(title="Users", rows=500, cols=5)
-                sheet.insert_row(["User_ID", "Name", "Last_Seen"], index=1)
-            
-            cell = None
-            try:
-                cell = sheet.find(user_id)
-            except:
-                cell = None
-
-            if cell:
-                sheet.update_cell(cell.row, 2, name)
-                sheet.update_cell(cell.row, 3, now_str)
-            else:
-                sheet.insert_row([user_id, name, now_str], index=2)
-        except Exception as e:
-            print(f"Spreadsheet save error: {e}")
-
-# --- Google ドライブへのPDFアップロード＆スプレッドシートログ記録 ---
-def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
-    if not SERVICE_ACCOUNT_JSON:
-        return False
-    try:
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        scopes = ["https://www.googleapis.com/auth/drive"]
         info = json.loads(SERVICE_ACCOUNT_JSON)
         creds = Credentials.from_service_account_info(info, scopes=scopes)
         
-        drive_link = ""
-        if DRIVE_FOLDER_ID:
-            drive_service = build('drive', 'v3', credentials=creds)
-            file_metadata = {
-                'name': f"承認済み_{user_name}_{filename}",
-                'parents': [DRIVE_FOLDER_ID]
-            }
-            media = MediaFileUpload(local_pdf_path, mimetype='application/pdf')
-            uploaded_file = drive_service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id, webViewLink'
-            ).execute()
-            drive_link = uploaded_file.get('webViewLink', '')
-
-        if SPREADSHEET_ID:
-            client = gspread.authorize(creds)
-            sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-            now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-            sheet.append_row([now_str, user_id, user_name, filename, drive_link])
-            
-        return True
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+        # タイムスタンプ付きのファイル名を自動生成（例：承諾済み_山田様_20260605_123456_sample.pdf）
+        now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
+        new_filename = f"承諾済み_{user_name}_{now_str}_{filename}"
+        
+        file_metadata = {
+            'name': new_filename,
+            'parents': [DRIVE_FOLDER_ID]
+        }
+        media = MediaFileUpload(local_pdf_path, mimetype='application/pdf')
+        uploaded_file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink'
+        ).execute()
+        
+        return uploaded_file.get('webViewLink', '')
     except Exception as e:
-        print(f"Drive/Sheet Log Error: {e}")
-        return False
+        print(f"Drive Upload Error: {e}")
+        return ""
 
 def create_approval_card():
     flex_json = {
@@ -203,7 +106,7 @@ def create_approval_card():
     }
     return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
-def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護者"):
+def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
     
@@ -244,11 +147,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護�
     start_y = STAMP_Y + 1.0
     line_height = 8.0
     
-    lines = [
-        f"{date_str}",
-        f"{time_str}",
-        f"{user_name}"
-    ]
+    lines = [f"{date_str}", f"{time_str}", f"{user_name}"]
     
     for i, line in enumerate(lines):
         point = fitz.Point(start_x, start_y + (i * line_height))
@@ -283,7 +182,7 @@ ADMIN_HTML = """
         .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
         h2 { color: #333; margin-top: 0; }
         label { font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; }
-        input[type="text"], input[type="file"], select { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; }
         button { background: #00B900; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; font-weight: bold; font-size: 16px; margin-top: 20px; cursor: pointer; }
         button:hover { background: #009900; }
         .msg { margin-top: 15px; padding: 10px; background: #e2f0d9; border: 1px solid #b2d8a0; border-radius: 5px; color: #2d572c; }
@@ -291,48 +190,37 @@ ADMIN_HTML = """
     </style>
     <script>
         function checkConfirm() {
-            var select = document.getElementById("user_select");
-            var selectedText = select.options[select.selectedIndex].text;
+            var userId = document.getElementById("user_id").value;
             var fileInput = document.getElementById("pdf_file");
             var fileName = fileInput.files[0] ? fileInput.files[0].name : "未選択";
             
-            if (!select.value) {
-                alert("送信先の保護者を選択してください。");
+            if (!userId) {
+                alert("送信先のLINEユーザーIDを入力してください。");
                 return false;
             }
-            var result = confirm("【送信前の最終確認】\\n\\n送信先保護者: " + selectedText + "\\n添付ファイル: " + fileName + "\\n\\n間違いありませんか？送信を実行します。");
-            return result;
-        }
-        function updateUserId(val) {
-            document.getElementById("user_id_input").value = val;
+            return confirm("【送信確認】\\n\\n宛先ID: " + userId + "\\n添付ファイル: " + fileName + "\\n\\n送信を実行しますか？");
         }
     </script>
 </head>
 <body>
     <div class="card">
-        <h2>📄 PDF・承諾カード送信（保護者用）</h2>
+        <h2>📄 PDF・承諾カード送信（管理画面）</h2>
         {% if msg %}
             <div class="msg">{{ msg }}</div>
         {% endif %}
         
         <div class="warn">
-            ⚠️ <strong>誤送信防止機能：</strong> 送信前に宛先保護者様とお子様名、添付PDF名をポップアップで確認します。
+            💡 <strong>使い方：</strong> 保護者のLINE User IDを入力し、PDFを選択して送信してください。
         </div>
 
         <form method="POST" enctype="multipart/form-data" onsubmit="return checkConfirm();">
-            <label>① 送信先の保護者様を選択</label>
-            <select id="user_select" onchange="updateUserId(this.value);" required>
-                <option value="">-- 送信先の保護者を選択してください --</option>
-                {% for uid, info in users.items() %}
-                    <option value="{{ uid }}">{{ info.name }} 様 (最終更新: {{ info.last_seen }})</option>
-                {% endfor %}
-            </select>
-            <input type="hidden" name="user_id" id="user_id_input" required>
+            <label>① 送信先のLINE User ID</label>
+            <input type="text" name="user_id" id="user_id" placeholder="Uxxxxxxxx... (LINEのユーザーID)" required>
 
             <label>② 送付するPDFファイルを選択</label>
             <input type="file" name="pdf_file" id="pdf_file" accept=".pdf" required>
 
-            <button type="submit">送信実行（確認後に送信）</button>
+            <button type="submit">送信実行</button>
         </form>
     </div>
 </body>
@@ -366,12 +254,11 @@ def admin_page():
                             messages=[text_msg, card_msg]
                         )
                     )
-                    msg = "✅ 送信完了しました！保護者様へPDFと承諾カードが届きました。"
+                    msg = "✅ 送信完了しました！"
                 except Exception as e:
                     msg = f"❌ 送信エラー: {str(e)}"
                     
-    users = get_user_list()
-    return render_template_string(ADMIN_HTML, users=users, msg=msg)
+    return render_template_string(ADMIN_HTML, msg=msg)
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -387,8 +274,6 @@ def callback():
 def handle_file(event):
     message_id = event.message.id
     user_id = event.source.user_id
-    save_user_id(user_id)
-    
     save_path = f"/tmp/latest_{user_id}.pdf"
     with ApiClient(configuration) as api_client:
         line_bot_blob_api = MessagingApiBlob(api_client)
@@ -398,26 +283,7 @@ def handle_file(event):
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    user_id = event.source.user_id
-    user_text = event.message.text.strip()
-    display_name = ""
-    
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            profile = line_bot_api.get_profile(user_id)
-            if profile and profile.display_name:
-                display_name = profile.display_name
-    except:
-        pass
-        
-    saved_name = user_text if user_text else (display_name or "保護者")
-    
-    # スプレッドシートへ強制的に2行目挿入保存
-    save_user_id(user_id, saved_name)
-    
-    reply_text = f"ご連絡ありがとうございます！\n保護者様（お名前: {saved_name}）として登録いたしました。"
-    
+    reply_text = "メッセージありがとうございます！管理者から送られてきたPDFの「承諾する」ボタンを押すと、自動押印されてGoogleドライブに保存されます。"
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
@@ -449,18 +315,19 @@ def handle_postback(event):
         except Exception:
             pass
             
-        save_user_id(user_id, user_name)
-        
         try:
-            add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name)
-            log_approval_and_upload_pdf(user_id, user_name, output_pdf, output_filename)
+            # 1. 承認スタンプを押す
+            add_text_stamp(input_pdf, output_pdf, user_name=user_name)
             
-            host_url = request.host_url.rstrip('/')
-            download_url = f"{host_url}/files/{output_filename}"
+            # 2. Googleドライブの指定フォルダへタイムスタンプ付きで直接保存
+            drive_link = upload_approved_pdf_to_drive(user_name, output_pdf, output_filename)
             
-            reply_text = f"ご承諾ありがとうございます！\n自動押印（電子承認）が完了しました。\n\n【押印済みPDFの確認URL】\n{download_url}"
+            if drive_link:
+                reply_text = f"ご承諾ありがとうございます！\n自動押印とGoogleドライブへの保存が完了しました。\n\n【保存されたPDFの確認リンク】\n{drive_link}"
+            else:
+                reply_text = "ご承諾ありがとうございます！自動押印が完了しました。"
         except Exception as e:
-            reply_text = f"押印処理中にエラーが発生しました: {str(e)}"
+            reply_text = f"処理中にエラーが発生しました: {str(e)}"
             
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
