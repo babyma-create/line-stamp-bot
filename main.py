@@ -144,11 +144,11 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
     
-    # 「確認」や「送付」などのキーワードが含まれる場合は「承諾カード」を送信
-    if "確認" in user_msg or "送付" in user_msg or "承認" in user_msg:
+    # メッセージに「出席内容」が含まれる場合のみ「承諾カード」を送信
+    if "出席内容" in user_msg:
         reply_obj = create_approval_card()
     else:
-        # それ以外の一般的な問い合わせには案内メッセージを返信
+        # それ以外の一般的な問い合わせには手動確認の案内を返信
         reply_obj = TextMessage(
             text="メッセージありがとうございます。\nただいま個別のお問い合わせは手動で確認しております。お時間をいただきますが少しお待ちください。"
         )
