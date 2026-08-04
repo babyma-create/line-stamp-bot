@@ -78,7 +78,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     HEIGHT = 32.0
 
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
-    stamp_color = (0.9, 0.1, 0.1)
+    stamp_color = (0.9, 0.1, 0.1)  # 朱色
 
     shape = page.new_shape()
     shape.draw_round_rect(rect, 4)
@@ -122,28 +122,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
 def index():
     return "OK", 200
 
-# 🌟【追加機能】特定の人へ個別にメッセージ（Push Message）を送信するURL
-# 使い方: https://line-stamp-bot-y4g2.onrender.com/send?user_id=送信先のLINE_USER_ID
-@app.route("/send", methods=['GET'])
-def send_push():
-    target_user_id = request.args.get('user_id')
-    
-    if not target_user_id:
-        return "エラー: ?user_id=xxxx の形式でLINEユーザーIDを指定してください。", 400
-
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message(
-                PushMessageRequest(
-                    to=target_user_id,
-                    messages=[create_approval_card()]
-                )
-            )
-        return f"LINEユーザー ({target_user_id}) へ確認カードを送信しました！", 200
-    except Exception as e:
-        return f"送信エラー: {str(e)}", 500
-
+# 押印済みPDFのダウンロード用URL
 @app.route("/files/<filename>", methods=['GET'])
 def download_file(filename):
     return send_from_directory("/tmp", filename)
@@ -160,15 +139,26 @@ def callback():
 
     return 'OK'
 
-# --- 1. 自動返信（一応残していますが、発言不要で個別送信可能になりました） ---
+# --- 1. メッセージを受信した時の処理 ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    user_msg = event.message.text.strip()
+    
+    # 「確認」や「送付」などのキーワードが含まれる場合は「承諾カード」を送信
+    if "確認" in user_msg or "送付" in user_msg or "承認" in user_msg:
+        reply_obj = create_approval_card()
+    else:
+        # それ以外の一般的な問い合わせには案内メッセージを返信
+        reply_obj = TextMessage(
+            text="メッセージありがとうございます。\nただいま個別のお問い合わせは手動で確認しております。お時間をいただきますが少しお待ちください。"
+        )
+
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[create_approval_card()]
+                messages=[reply_obj]
             )
         )
 
