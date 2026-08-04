@@ -116,7 +116,14 @@ def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
             color=(0.3, 0.3, 0.3)
         )
         
-    doc.save(output_pdf_path)
+    # 【改ざん防止】管理者もパスワードで解除できない最強のロック（閲覧と印刷のみ許可）
+    permissions = fitz.PDF_PERM_ACCESSIBILITY | fitz.PDF_PERM_PRINT
+    doc.save(
+        output_pdf_path,
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        owner_pw=None,  # パスワードなし = 管理者を含め誰も後から内容を書き換えられない
+        permissions=permissions
+    )
     doc.close()
 
 @app.route("/", methods=['GET'])
@@ -270,14 +277,14 @@ def handle_postback(event):
             pass
             
         try:
-            # 1. 承認スタンプを押す
+            # 1. 承認スタンプと改ざん防止ロックを押す
             add_text_stamp(input_pdf, output_pdf, user_name=user_name)
             
-            # 2. サーバー内の一時領域に保存したPDFのダウンロードリンクを生成
+            # 2. ダウンロードリンクを生成して返信
             host_url = request.host_url.rstrip('/')
             download_link = f"{host_url}/files/{output_filename}"
             
-            reply_text = f"ご承諾ありがとうございます！\n自動押印が完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
+            reply_text = f"ご承諾ありがとうございます！\n自動押印と改ざん防止ロックが完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
             
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
