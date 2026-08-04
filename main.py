@@ -2,6 +2,7 @@ import os
 import json
 import fitz  # PyMuPDF
 from datetime import datetime
+import pytz
 from flask import Flask, request, abort, send_from_directory, render_template_string
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -40,7 +41,8 @@ def get_user_list():
 def save_user_id(user_id):
     users = get_user_list()
     if user_id not in users:
-        users[user_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        jst = pytz.timezone('Asia/Tokyo')
+        users[user_id] = datetime.now(jst).strftime("%Y-%m-%d %H:%M:%S")
         with open(USER_LIST_FILE, "w") as f:
             json.dump(users, f)
 
@@ -88,19 +90,20 @@ def create_approval_card():
     return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
 # --- テキスト印鑑 ＆ 枠外ログ印字処理 ---
-def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認者", line_user_id=""):
+def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認者"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
 
-    STAMP_X = 450.0
-    STAMP_Y = 700.0
-    WIDTH = 70.0
-    HEIGHT = 32.0
+    # 右上エリアに配置
+    STAMP_X = 480.0
+    STAMP_Y = 40.0
+    WIDTH = 65.0
+    HEIGHT = 30.0
 
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
     stamp_color = (0.9, 0.1, 0.1)  # 朱色
 
-    # 四角い枠線を描画（互換性を高めた処理）
+    # 四角い枠線を描画
     shape = page.new_shape()
     shape.draw_rect(rect)
     shape.finish(color=stamp_color, width=1.5)
@@ -110,21 +113,27 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     page.insert_textbox(
         rect,
         "【 承 認 】",
-        fontsize=9,
+        fontsize=8.5,
         fontname="japan",
         color=stamp_color,
         align=fitz.TEXT_ALIGN_CENTER
     )
 
-    now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
-    start_x = STAMP_X - 30
-    start_y = STAMP_Y + HEIGHT + 12
-    line_height = 9.0
+    # 日本時間（JST）を取得
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+    date_str = now.strftime("%Y/%m/%d")
+    time_str = now.strftime("%H:%M")
+
+    # 枠の右側にテキストを配置
+    start_x = STAMP_X + WIDTH + 8
+    start_y = STAMP_Y + 6
+    line_height = 8.5
 
     lines = [
         f"承認者: {user_name}",
-        f"確認日: {now_str}",
-        f"LINE ID: {line_user_id}"
+        f"確認日: {date_str}",
+        f"        {time_str}"
     ]
 
     for i, line in enumerate(lines):
@@ -296,9 +305,19 @@ def handle_postback(event):
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
 
+        # ユーザーのLINE表示名を取得する処理
+        user_name = "保護者 様"
         try:
-            user_name = "保護者 様"
-            add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name, line_user_id=user_id)
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                profile = line_bot_api.get_profile(user_id)
+                if profile and profile.display_name:
+                    user_name = f"{profile.display_name} 様"
+        except Exception:
+            pass
+
+        try:
+            add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name)
             
             host_url = request.host_url.rstrip('/')
             download_url = f"{host_url}/files/{output_filename}"
