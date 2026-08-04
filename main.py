@@ -60,7 +60,7 @@ def get_user_list():
                 users = json.load(f)
         except:
             users = {}
-
+    
     client = get_gspread_client()
     if client:
         try:
@@ -70,7 +70,7 @@ def get_user_list():
             except:
                 sheet = sh.add_worksheet(title="Users", rows=500, cols=5)
                 sheet.append_row(["User_ID", "Name", "Last_Seen"])
-
+            
             records = sheet.get_all_records()
             for r in records:
                 uid = str(r.get("User_ID", "")).strip()
@@ -81,24 +81,23 @@ def get_user_list():
                     }
         except Exception as e:
             print(f"User list fetch error: {e}")
-
+            
     return users
 
 def save_user_id(user_id, display_name=""):
     users = get_user_list()
     now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     name = display_name or users.get(user_id, {}).get("name", "保護者")
-    
     users[user_id] = {
         "last_seen": now_str,
         "name": name
     }
-
+    
     try:
         with open(USER_LIST_FILE, "w") as f:
             json.dump(users, f, ensure_ascii=False)
-    except:
-        pass
+    except Exception as e:
+        print(f"Local save error: {e}")
 
     client = get_gspread_client()
     if client:
@@ -108,8 +107,8 @@ def save_user_id(user_id, display_name=""):
                 sheet = sh.worksheet("Users")
             except:
                 sheet = sh.add_worksheet(title="Users", rows=500, cols=5)
-                sheet.append_row(["User_ID", "Name", "Last_Seen"])
-
+                sheet.insert_row(["User_ID", "Name", "Last_Seen"], index=1)
+            
             cell = None
             try:
                 cell = sheet.find(user_id)
@@ -120,15 +119,14 @@ def save_user_id(user_id, display_name=""):
                 sheet.update_cell(cell.row, 2, name)
                 sheet.update_cell(cell.row, 3, now_str)
             else:
-                sheet.append_row([user_id, name, now_str])
+                sheet.insert_row([user_id, name, now_str], index=2)
         except Exception as e:
-            print(f"User save error: {e}")
+            print(f"Spreadsheet save error: {e}")
 
 # --- Google ドライブへのPDFアップロード＆スプレッドシートログ記録 ---
 def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
     if not SERVICE_ACCOUNT_JSON:
         return False
-        
     try:
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
@@ -165,72 +163,70 @@ def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
 
 def create_approval_card():
     flex_json = {
-      "type": "bubble",
-      "body": {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
-          {
-            "type": "text",
-            "text": "📄 出席・確認のお願い",
-            "weight": "bold",
-            "size": "md"
-          },
-          {
-            "type": "text",
-            "text": "内容をご確認の上、問題がなければ下の「承諾する」ボタンを押してください。",
-            "wrap": True,
-            "size": "sm",
-            "color": "#666666",
-            "margin": "md"
-          }
-        ]
-      },
-      "footer": {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
-          {
-            "type": "button",
-            "action": {
-              "type": "postback",
-              "label": "承諾する",
-              "data": "action=approve"
-            },
-            "style": "primary",
-            "color": "#00B900"
-          }
-        ]
-      }
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📄 出席・確認のお願い",
+                    "weight": "bold",
+                    "size": "md"
+                },
+                {
+                    "type": "text",
+                    "text": "内容をご確認の上、問題がなければ下の「承諾する」ボタンを押してください。",
+                    "wrap": True,
+                    "size": "sm",
+                    "color": "#666666",
+                    "margin": "md"
+                }
+            ]
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "postback",
+                        "label": "承諾する",
+                        "data": "action=approve"
+                    },
+                    "style": "primary",
+                    "color": "#00B900"
+                }
+            ]
+        }
     }
     return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
 def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護者"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
-
+    
     page_width = page.rect.width
     page_height = page.rect.height
+    
     mm_to_pt = 2.83465
-
     right_margin_pt = 20.0 * mm_to_pt
     bottom_margin_pt = 3.0 * mm_to_pt
-
     stamp_width = 18.0 * mm_to_pt
     stamp_height = 10.0 * mm_to_pt
     date_area_width = 65.0
-
+    
     STAMP_X = page_width - right_margin_pt - stamp_width - date_area_width
     STAMP_Y = page_height - bottom_margin_pt - stamp_height
-
+    
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + stamp_width, STAMP_Y + stamp_height)
     stamp_color = (0.9, 0.1, 0.1)
-
     shape = page.new_shape()
     shape.draw_rect(rect)
     shape.finish(color=stamp_color, width=1.5)
     shape.commit()
-
+    
     page.insert_textbox(
         rect,
         "【 承 認 】",
@@ -239,21 +235,21 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護�
         color=stamp_color,
         align=fitz.TEXT_ALIGN_CENTER
     )
-
+    
     now = datetime.now(JST)
     date_str = now.strftime("%Y/%m/%d")
     time_str = now.strftime("%H:%M")
-
+    
     start_x = STAMP_X + stamp_width + 4.0
     start_y = STAMP_Y + 1.0
     line_height = 8.0
-
+    
     lines = [
         f"{date_str}",
         f"{time_str}",
         f"{user_name}"
     ]
-
+    
     for i, line in enumerate(lines):
         point = fitz.Point(start_x, start_y + (i * line_height))
         page.insert_text(
@@ -263,7 +259,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護�
             fontname="japan",
             color=(0.3, 0.3, 0.3)
         )
-
+        
     doc.save(output_pdf_path)
     doc.close()
 
@@ -299,12 +295,11 @@ ADMIN_HTML = """
             var selectedText = select.options[select.selectedIndex].text;
             var fileInput = document.getElementById("pdf_file");
             var fileName = fileInput.files[0] ? fileInput.files[0].name : "未選択";
-
+            
             if (!select.value) {
                 alert("送信先の保護者を選択してください。");
                 return false;
             }
-
             var result = confirm("【送信前の最終確認】\\n\\n送信先保護者: " + selectedText + "\\n添付ファイル: " + fileName + "\\n\\n間違いありませんか？送信を実行します。");
             return result;
         }
@@ -332,7 +327,6 @@ ADMIN_HTML = """
                     <option value="{{ uid }}">{{ info.name }} 様 (最終更新: {{ info.last_seen }})</option>
                 {% endfor %}
             </select>
-
             <input type="hidden" name="user_id" id="user_id_input" required>
 
             <label>② 送付するPDFファイルを選択</label>
@@ -351,20 +345,20 @@ def admin_page():
     if request.method == 'POST':
         target_user_id = request.form.get('user_id', '').strip()
         pdf_file = request.files.get('pdf_file')
-
+        
         if target_user_id and pdf_file:
             save_path = f"/tmp/latest_{target_user_id}.pdf"
             pdf_file.save(save_path)
-
+            
             host_url = request.host_url.rstrip('/')
             pdf_download_url = f"{host_url}/files/latest_{target_user_id}.pdf"
-
+            
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 
                 text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
                 card_msg = create_approval_card()
-
+                
                 try:
                     line_bot_api.push_message(
                         PushMessageRequest(
@@ -375,7 +369,7 @@ def admin_page():
                     msg = "✅ 送信完了しました！保護者様へPDFと承諾カードが届きました。"
                 except Exception as e:
                     msg = f"❌ 送信エラー: {str(e)}"
-
+                    
     users = get_user_list()
     return render_template_string(ADMIN_HTML, users=users, msg=msg)
 
@@ -383,12 +377,10 @@ def admin_page():
 def callback():
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-
     return 'OK'
 
 @handler.add(MessageEvent, message=FileMessageContent)
@@ -396,8 +388,8 @@ def handle_file(event):
     message_id = event.message.id
     user_id = event.source.user_id
     save_user_id(user_id)
+    
     save_path = f"/tmp/latest_{user_id}.pdf"
-
     with ApiClient(configuration) as api_client:
         line_bot_blob_api = MessagingApiBlob(api_client)
         content = line_bot_blob_api.get_message_content(message_id)
@@ -408,8 +400,8 @@ def handle_file(event):
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
-    
     display_name = ""
+    
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
@@ -418,14 +410,12 @@ def handle_message(event):
                 display_name = profile.display_name
     except:
         pass
-
-    # 名前として受け取るテキスト（送られたテキスト優先、なければLINE表示名）
+        
     saved_name = user_text if user_text else (display_name or "保護者")
-
-    # スプレッドシートに登録・更新
+    
+    # スプレッドシートへ強制的に2行目挿入保存
     save_user_id(user_id, saved_name)
-
-    # 登録完了の自動返信（これで既読がつき、返信が届きます！）
+    
     reply_text = f"ご連絡ありがとうございます！\n保護者様（お名前: {saved_name}）として登録いたしました。"
     
     with ApiClient(configuration) as api_client:
@@ -440,17 +430,15 @@ def handle_message(event):
 @handler.add(PostbackEvent)
 def handle_postback(event):
     data = event.postback.data
-
     if data == "action=approve":
         user_id = event.source.user_id
         input_pdf = f"/tmp/latest_{user_id}.pdf"
-        
         if not os.path.exists(input_pdf):
             input_pdf = "sample_record.pdf"
-
+            
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
-
+        
         user_name = "保護者"
         try:
             with ApiClient(configuration) as api_client:
@@ -460,20 +448,20 @@ def handle_postback(event):
                     user_name = profile.display_name
         except Exception:
             pass
-
+            
         save_user_id(user_id, user_name)
-
+        
         try:
             add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name)
             log_approval_and_upload_pdf(user_id, user_name, output_pdf, output_filename)
             
             host_url = request.host_url.rstrip('/')
             download_url = f"{host_url}/files/{output_filename}"
+            
             reply_text = f"ご承諾ありがとうございます！\n自動押印（電子承認）が完了しました。\n\n【押印済みPDFの確認URL】\n{download_url}"
-
         except Exception as e:
             reply_text = f"押印処理中にエラーが発生しました: {str(e)}"
-
+            
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
