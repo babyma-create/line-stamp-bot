@@ -228,7 +228,7 @@ ADMIN_HTML = """
         .warn { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; font-size: 13px; margin-top: 10px; }
     </style>
     <script>
-        function confirmSend() {
+        function confirmSend(e) {
             var select = document.getElementById("user_select");
             var selectedText = select.options[select.selectedIndex].text;
             var fileInput = document.getElementById("pdf_file");
@@ -236,9 +236,16 @@ ADMIN_HTML = """
 
             if (!select.value) {
                 alert("送信先の保護者を選択してください。");
+                if (e) e.preventDefault();
                 return false;
             }
-            return confirm("【送信前の最終確認】\\n\\n送信先保護者: " + selectedText + "\\n添付ファイル: " + fileName + "\\n\\n間違いありませんか？送信を実行します。");
+
+            var res = confirm("【送信前の最終確認】\n\n送信先保護者: " + selectedText + "\n添付ファイル: " + fileName + "\n\n間違いありませんか？送信を実行します。");
+            if (!res) {
+                if (e) e.preventDefault();
+                return false;
+            }
+            return true;
         }
         function updateUserId(val) {
             document.getElementById("user_id_input").value = val;
@@ -256,7 +263,7 @@ ADMIN_HTML = """
             ⚠️ <strong>誤送信防止機能：</strong> 送信前に宛先保護者様とお子様名、添付PDF名をポップアップで確認します。
         </div>
 
-        <form method="POST" enctype="multipart/form-data" onsubmit="return confirmSend();">
+        <form method="POST" enctype="multipart/form-data" onsubmit="return confirmSend(event);">
             <label>① 送信先の保護者様を選択</label>
             <select id="user_select" onchange="updateUserId(this.value);" required>
                 <option value="">-- 送信先の保護者を選択してください --</option>
