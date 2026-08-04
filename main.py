@@ -91,27 +91,30 @@ def create_approval_card():
     return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
 # --- テキスト印鑑 ＆ 枠外ログ印字処理 ---
-def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認者"):
+def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
 
-    # ページの高さと幅を取得（単位: ポイント / 1pt ≒ 0.3528mm）
+    # ページの高さと幅を取得（単位: ポイント）
     page_width = page.rect.width
     page_height = page.rect.height
 
     # 単位換算: 1mm ≒ 2.83465 pt
     mm_to_pt = 2.83465
 
-    # 右端から5mm、下から7cm（70mm）の位置を計算
-    right_margin_pt = 5.0 * mm_to_pt   # 5mm
-    bottom_margin_pt = 70.0 * mm_to_pt # 70mm (7cm)
+    # 右端から 20mm (2.0cm)、下から 3mm の位置を計算
+    right_margin_pt = 20.0 * mm_to_pt  # 右端から20mm（5mm + 15mm左ずらし）
+    bottom_margin_pt = 3.0 * mm_to_pt  # 下から3mm
 
-    # 朱色枠のサイズ（幅約20mm、高さ約10mm）
-    stamp_width = 20.0 * mm_to_pt
+    # 朱色枠のサイズ（幅約18mm、高さ約10mm）
+    stamp_width = 18.0 * mm_to_pt
     stamp_height = 10.0 * mm_to_pt
 
-    # 枠の左上X・Y座標
-    STAMP_X = page_width - right_margin_pt - stamp_width - 80.0  # 右側のテキストが入るよう調整
+    # 日付テキストの幅用エリア
+    date_area_width = 45.0
+
+    # 枠の左上X・Y座標（PDF座標系は左上が原点）
+    STAMP_X = page_width - right_margin_pt - stamp_width - date_area_width
     STAMP_Y = page_height - bottom_margin_pt - stamp_height
 
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + stamp_width, STAMP_Y + stamp_height)
@@ -123,11 +126,15 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     shape.finish(color=stamp_color, width=1.5)
     shape.commit()
 
-    # 「【 承 認 】」の文字を入れる
+    # 表示名から苗字のみを抽出
+    clean_name = user_name.replace(" 様", "").replace("様", "").strip()
+    family_name = clean_name.split()[0].split(" ")[0] if clean_name else "承認"
+
+    # 朱色枠の中に苗字のみを配置（枠内ぴったりに収める設定）
     page.insert_textbox(
         rect,
-        "【 承 認 】",
-        fontsize=8.0,
+        family_name,
+        fontsize=10.0,
         fontname="japan",
         color=stamp_color,
         align=fitz.TEXT_ALIGN_CENTER
@@ -138,15 +145,14 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     date_str = now.strftime("%Y/%m/%d")
     time_str = now.strftime("%H:%M")
 
-    # 枠の右側にテキストを配置
-    start_x = STAMP_X + stamp_width + 6.0
+    # 枠の右側に「日付」と「時間」のみを配置
+    start_x = STAMP_X + stamp_width + 4.0
     start_y = STAMP_Y + 2.0
-    line_height = 8.0
+    line_height = 9.0
 
     lines = [
-        f"承認者: {user_name}",
-        f"確認日: {date_str}",
-        f"        {time_str}"
+        f"{date_str}",
+        f"{time_str}"
     ]
 
     for i, line in enumerate(lines):
@@ -156,7 +162,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
             line,
             fontsize=6.5,
             fontname="japan",
-            color=(0.2, 0.2, 0.2)
+            color=(0.3, 0.3, 0.3)
         )
 
     doc.save(output_pdf_path)
@@ -319,13 +325,13 @@ def handle_postback(event):
         output_pdf = f"/tmp/{output_filename}"
 
         # ユーザーのLINE表示名を取得する処理
-        user_name = "保護者 様"
+        user_name = "承認"
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 profile = line_bot_api.get_profile(user_id)
                 if profile and profile.display_name:
-                    user_name = f"{profile.display_name} 様"
+                    user_name = profile.display_name
         except Exception:
             pass
 
