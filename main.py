@@ -1,7 +1,8 @@
 import os
+import json
 import fitz  # PyMuPDF
 from datetime import datetime
-from flask import Flask, request, abort, send_from_directory
+from flask import Flask, request, abort, send_from_directory, render_template_string
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -10,6 +11,7 @@ from linebot.v3.messaging import (
     MessagingApi,
     MessagingApiBlob,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage,
     FlexMessage,
     FlexContainer
@@ -23,6 +25,24 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
+
+USER_LIST_FILE = "/tmp/user_list.json"
+
+def get_user_list():
+    if os.path.exists(USER_LIST_FILE):
+        try:
+            with open(USER_LIST_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_user_id(user_id):
+    users = get_user_list()
+    if user_id not in users:
+        users[user_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(USER_LIST_FILE, "w") as f:
+            json.dump(users, f)
 
 # --- 確認カード（Flex Message）の共通データ作成 ---
 def create_approval_card():
@@ -122,10 +142,92 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
 def index():
     return "OK", 200
 
-# 押印済みPDFのダウンロード用URL
+# 押印済みPDF・公開PDFのダウンロード用URL
 @app.route("/files/<filename>", methods=['GET'])
 def download_file(filename):
     return send_from_directory("/tmp", filename)
+
+# --- 👑 管理者専用送信ページ ---
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>管理者用 送信画面</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 500px; margin: auto; background: #f4f7f6; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h2 { color: #333; margin-top: 0; }
+        label { font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; }
+        input[type="text"], input[type="file"], select { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; }
+        button { background: #00B900; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; font-weight: bold; font-size: 16px; margin-top: 20px; cursor: pointer; }
+        button:hover { background: #009900; }
+        .msg { margin-top: 15px; padding: 10px; background: #e2f0d9; border: 1px solid #b2d8a0; border-radius: 5px; color: #2d572c; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>📄 PDF・承諾カード送信</h2>
+        {% if msg %}
+            <div class="msg">{{ msg }}</div>
+        {% endif %}
+        <form method="POST" enctype="multipart/form-data">
+            <label>送信先の LINE User ID</label>
+            <input type="text" name="user_id" placeholder="U1234567890abcdef..." required>
+            <small style="color:#666;">※受信履歴のあるユーザーIDリスト：</small>
+            <select onchange="this.previousElementSibling.previousElementSibling.value=this.value;">
+                <option value="">-- 選択してください --</option>
+                {% for uid, time in users.items() %}
+                    <option value="{{ uid }}">{{ uid }} ({{ time }})</option>
+                {% endfor %}
+            </select>
+
+            <label>送付するPDFファイル</label>
+            <input type="file" name="pdf_file" accept=".pdf" required>
+
+            <button type="submit">送信（PDF＋確認カード）</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+@app.route("/admin", methods=['GET', 'POST'])
+def admin_page():
+    msg = None
+    if request.method == 'POST':
+        target_user_id = request.form.get('user_id', '').strip()
+        pdf_file = request.files.get('pdf_file')
+
+        if target_user_id and pdf_file:
+            save_path = f"/tmp/latest_{target_user_id}.pdf"
+            pdf_file.save(save_path)
+
+            host_url = request.host_url.rstrip('/')
+            pdf_download_url = f"{host_url}/files/latest_{target_user_id}.pdf"
+
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                
+                # 1. PDFリンクメッセージ送付
+                text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
+                # 2. 承諾カード送付
+                card_msg = create_approval_card()
+
+                try:
+                    line_bot_api.push_message(
+                        PushMessageRequest(
+                            to=target_user_id,
+                            messages=[text_msg, card_msg]
+                        )
+                    )
+                    msg = "✅ 送信完了しました！PDFと承諾カードが届きました。"
+                except Exception as e:
+                    msg = f"❌ 送信エラー: {str(e)}"
+
+    users = get_user_list()
+    return render_template_string(ADMIN_HTML, users=users, msg=msg)
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -142,9 +244,9 @@ def callback():
 # --- 1. ファイル（PDF）を受信した時の処理 ---
 @handler.add(MessageEvent, message=FileMessageContent)
 def handle_file(event):
-    # 送信されたファイルのデータをLINEサーバーから取得して一時保存
     message_id = event.message.id
     user_id = event.source.user_id
+    save_user_id(user_id)
     save_path = f"/tmp/latest_{user_id}.pdf"
 
     with ApiClient(configuration) as api_client:
@@ -156,13 +258,13 @@ def handle_file(event):
 # --- 2. テキストメッセージを受信した時の処理 ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    user_id = event.source.user_id
+    save_user_id(user_id)
     user_msg = event.message.text.strip()
     
-    # メッセージに「出席内容」が含まれる場合のみ「承諾カード」を送信
     if "出席内容" in user_msg:
         reply_obj = create_approval_card()
     else:
-        # それ以外の一般的な問い合わせには手動確認の案内を返信
         reply_obj = TextMessage(
             text="メッセージありがとうございます。\nただいま個別のお問い合わせは手動で確認しております。お時間をいただきますが少しお待ちください。"
         )
@@ -183,9 +285,9 @@ def handle_postback(event):
 
     if data == "action=approve":
         user_id = event.source.user_id
+        save_user_id(user_id)
         input_pdf = f"/tmp/latest_{user_id}.pdf"
         
-        # 受信した個別PDFが存在しない場合はサンプルを代替使用
         if not os.path.exists(input_pdf):
             input_pdf = "sample_record.pdf"
 
@@ -196,7 +298,6 @@ def handle_postback(event):
             user_name = "保護者 様"
             add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name, line_user_id=user_id)
             
-            # ドメイン名を取得して動的URLを生成
             host_url = request.host_url.rstrip('/')
             download_url = f"{host_url}/files/{output_filename}"
             reply_text = f"ご承諾ありがとうございます！\n自動押印（電子承認）が完了しました。\n\n【押印済みPDFの確認URL】\n{download_url}"
