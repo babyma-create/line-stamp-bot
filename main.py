@@ -6,63 +6,20 @@ from flask import Flask, request, abort, send_from_directory, render_template_st
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    MessagingApiBlob,
-    ReplyMessageRequest,
-    PushMessageRequest,
-    TextMessage,
-    FlexMessage,
-    FlexContainer
+    Configuration, ApiClient, MessagingApi, MessagingApiBlob,
+    ReplyMessageRequest, PushMessageRequest, TextMessage, FlexMessage, FlexContainer
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageContent, PostbackEvent
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
 
 app = Flask(__name__)
 
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID')
-SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
 
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
 JST = timezone(timedelta(hours=9))
-
-# --- Google ドライブへのPDFアップロード（タイムスタンプ＆改ざん不能な履歴付き） ---
-def upload_approved_pdf_to_drive(user_name, local_pdf_path, filename):
-    if not SERVICE_ACCOUNT_JSON or not DRIVE_FOLDER_ID:
-        return ""
-    try:
-        scopes = ["https://www.googleapis.com/auth/drive"]
-        info = json.loads(SERVICE_ACCOUNT_JSON)
-        creds = Credentials.from_service_account_info(info, scopes=scopes)
-        
-        drive_service = build('drive', 'v3', credentials=creds)
-        
-        # タイムスタンプ付きのファイル名を自動生成（例：承諾済み_山田様_20260605_123456_sample.pdf）
-        now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
-        new_filename = f"承諾済み_{user_name}_{now_str}_{filename}"
-        
-        file_metadata = {
-            'name': new_filename,
-            'parents': [DRIVE_FOLDER_ID]
-        }
-        media = MediaFileUpload(local_pdf_path, mimetype='application/pdf')
-        uploaded_file = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink'
-        ).execute()
-        
-        return uploaded_file.get('webViewLink', '')
-    except Exception as e:
-        print(f"Drive Upload Error: {e}")
-        return ""
 
 def create_approval_card():
     flex_json = {
@@ -118,13 +75,14 @@ def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     bottom_margin_pt = 3.0 * mm_to_pt
     stamp_width = 18.0 * mm_to_pt
     stamp_height = 10.0 * mm_to_pt
-    date_area_width = 65.0
+    date_area_width = 65.0 
     
     STAMP_X = page_width - right_margin_pt - stamp_width - date_area_width
     STAMP_Y = page_height - bottom_margin_pt - stamp_height
     
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + stamp_width, STAMP_Y + stamp_height)
     stamp_color = (0.9, 0.1, 0.1)
+    
     shape = page.new_shape()
     shape.draw_rect(rect)
     shape.finish(color=stamp_color, width=1.5)
@@ -148,7 +106,6 @@ def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     line_height = 8.0
     
     lines = [f"{date_str}", f"{time_str}", f"{user_name}"]
-    
     for i, line in enumerate(lines):
         point = fitz.Point(start_x, start_y + (i * line_height))
         page.insert_text(
@@ -193,7 +150,6 @@ ADMIN_HTML = """
             var userId = document.getElementById("user_id").value;
             var fileInput = document.getElementById("pdf_file");
             var fileName = fileInput.files[0] ? fileInput.files[0].name : "未選択";
-            
             if (!userId) {
                 alert("送信先のLINEユーザーIDを入力してください。");
                 return false;
@@ -208,18 +164,16 @@ ADMIN_HTML = """
         {% if msg %}
             <div class="msg">{{ msg }}</div>
         {% endif %}
-        
         <div class="warn">
             💡 <strong>使い方：</strong> 保護者のLINE User IDを入力し、PDFを選択して送信してください。
         </div>
-
         <form method="POST" enctype="multipart/form-data" onsubmit="return checkConfirm();">
             <label>① 送信先のLINE User ID</label>
             <input type="text" name="user_id" id="user_id" placeholder="Uxxxxxxxx... (LINEのユーザーID)" required>
-
+            
             <label>② 送付するPDFファイルを選択</label>
             <input type="file" name="pdf_file" id="pdf_file" accept=".pdf" required>
-
+            
             <button type="submit">送信実行</button>
         </form>
     </div>
@@ -243,7 +197,6 @@ def admin_page():
             
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
-                
                 text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
                 card_msg = create_approval_card()
                 
@@ -275,6 +228,7 @@ def handle_file(event):
     message_id = event.message.id
     user_id = event.source.user_id
     save_path = f"/tmp/latest_{user_id}.pdf"
+    
     with ApiClient(configuration) as api_client:
         line_bot_blob_api = MessagingApiBlob(api_client)
         content = line_bot_blob_api.get_message_content(message_id)
@@ -283,7 +237,7 @@ def handle_file(event):
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    reply_text = "メッセージありがとうございます！管理者から送られてきたPDFの「承諾する」ボタンを押すと、自動押印されてGoogleドライブに保存されます。"
+    reply_text = "メッセージありがとうございます！管理者から送られてきたPDFの「承諾する」ボタンを押すと、自動押印されたPDFがダウンロードできるようになります。"
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
@@ -319,25 +273,30 @@ def handle_postback(event):
             # 1. 承認スタンプを押す
             add_text_stamp(input_pdf, output_pdf, user_name=user_name)
             
-            # 2. Googleドライブの指定フォルダへタイムスタンプ付きで直接保存
-            drive_link = upload_approved_pdf_to_drive(user_name, output_pdf, output_filename)
+            # 2. サーバー内の一時領域に保存したPDFのダウンロードリンクを生成
+            host_url = request.host_url.rstrip('/')
+            download_link = f"{host_url}/files/{output_filename}"
             
-            if drive_link:
-                reply_text = f"ご承諾ありがとうございます！\n自動押印とGoogleドライブへの保存が完了しました。\n\n【保存されたPDFの確認リンク】\n{drive_link}"
-            else:
-                reply_text = "ご承諾ありがとうございます！自動押印が完了しました。"
-        except Exception as e:
-            reply_text = f"処理中にエラーが発生しました: {str(e)}"
+            reply_text = f"ご承諾ありがとうございます！\n自動押印が完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
             
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply_text)]
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_text)]
+                    )
                 )
-            )
+        except Exception as e:
+            error_text = f"❌ 処理エラーが発生しました: {str(e)}"
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=error_text)]
+                    )
+                )
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
