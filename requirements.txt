@@ -1,4 +1,6 @@
 Flask
 line-bot-sdk
-gunicorn
 PyMuPDF
+gspread
+google-auth
+google-api-python-client
