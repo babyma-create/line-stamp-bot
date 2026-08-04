@@ -9,6 +9,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage,
     FlexMessage,
     FlexContainer
@@ -23,86 +24,8 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
-# --- テキスト印鑑 ＆ 枠外ログ印字処理 ---
-def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認者", line_user_id=""):
-    doc = fitz.open(input_pdf_path)
-    page = doc[0]
-
-    # 印鑑枠の位置設定（X座標, Y座標, 幅, 高さ）
-    STAMP_X = 450.0
-    STAMP_Y = 700.0
-    WIDTH = 70.0
-    HEIGHT = 32.0
-
-    rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
-    stamp_color = (0.9, 0.1, 0.1)  # 朱色
-
-    # 1. 赤い角丸枠を描画
-    shape = page.new_shape()
-    shape.draw_round_rect(rect, 4)
-    shape.finish(color=stamp_color, width=1.5)
-    shape.commit()
-
-    # 2. 枠内の文字（【承認】）
-    page.insert_textbox(
-        rect,
-        "【 承 認 】",
-        fontsize=9,
-        fontname="japan",
-        color=stamp_color,
-        align=fitz.TEXT_ALIGN_CENTER
-    )
-
-    # 3. 枠の外（下側）に詳細情報 ＆ LINEログ（1行ずつ安全に描画）
-    now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
-    
-    start_x = STAMP_X - 30
-    start_y = STAMP_Y + HEIGHT + 12
-    line_height = 9.0  # 行間
-
-    lines = [
-        f"承認者: {user_name}",
-        f"確認日: {now_str}",
-        f"LINE ID: {line_user_id}"
-    ]
-
-    for i, line in enumerate(lines):
-        point = fitz.Point(start_x, start_y + (i * line_height))
-        page.insert_text(
-            point,
-            line,
-            fontsize=6.5,
-            fontname="japan",
-            color=(0.2, 0.2, 0.2)  # ダークグレー
-        )
-
-    doc.save(output_pdf_path)
-    doc.close()
-
-@app.route("/", methods=['GET'])
-def index():
-    return "OK", 200
-
-# 押印済みPDFのダウンロード用URL
-@app.route("/files/<filename>", methods=['GET'])
-def download_file(filename):
-    return send_from_directory("/tmp", filename)
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers.get('X-Line-Signature')
-    body = request.get_data(as_text=True)
-
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-
-    return 'OK'
-
-# --- 1. メッセージを受信した時の処理 ---
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
+# --- 確認カード（Flex Message）の共通データ作成 ---
+def create_approval_card():
     flex_json = {
       "type": "bubble",
       "body": {
@@ -142,13 +65,110 @@ def handle_message(event):
         ]
       }
     }
+    return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
+# --- テキスト印鑑 ＆ 枠外ログ印字処理 ---
+def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認者", line_user_id=""):
+    doc = fitz.open(input_pdf_path)
+    page = doc[0]
+
+    STAMP_X = 450.0
+    STAMP_Y = 700.0
+    WIDTH = 70.0
+    HEIGHT = 32.0
+
+    rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
+    stamp_color = (0.9, 0.1, 0.1)
+
+    shape = page.new_shape()
+    shape.draw_round_rect(rect, 4)
+    shape.finish(color=stamp_color, width=1.5)
+    shape.commit()
+
+    page.insert_textbox(
+        rect,
+        "【 承 認 】",
+        fontsize=9,
+        fontname="japan",
+        color=stamp_color,
+        align=fitz.TEXT_ALIGN_CENTER
+    )
+
+    now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
+    start_x = STAMP_X - 30
+    start_y = STAMP_Y + HEIGHT + 12
+    line_height = 9.0
+
+    lines = [
+        f"承認者: {user_name}",
+        f"確認日: {now_str}",
+        f"LINE ID: {line_user_id}"
+    ]
+
+    for i, line in enumerate(lines):
+        point = fitz.Point(start_x, start_y + (i * line_height))
+        page.insert_text(
+            point,
+            line,
+            fontsize=6.5,
+            fontname="japan",
+            color=(0.2, 0.2, 0.2)
+        )
+
+    doc.save(output_pdf_path)
+    doc.close()
+
+@app.route("/", methods=['GET'])
+def index():
+    return "OK", 200
+
+# 🌟【追加機能】特定の人へ個別にメッセージ（Push Message）を送信するURL
+# 使い方: https://line-stamp-bot-y4g2.onrender.com/send?user_id=送信先のLINE_USER_ID
+@app.route("/send", methods=['GET'])
+def send_push():
+    target_user_id = request.args.get('user_id')
+    
+    if not target_user_id:
+        return "エラー: ?user_id=xxxx の形式でLINEユーザーIDを指定してください。", 400
+
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=target_user_id,
+                    messages=[create_approval_card()]
+                )
+            )
+        return f"LINEユーザー ({target_user_id}) へ確認カードを送信しました！", 200
+    except Exception as e:
+        return f"送信エラー: {str(e)}", 500
+
+@app.route("/files/<filename>", methods=['GET'])
+def download_file(filename):
+    return send_from_directory("/tmp", filename)
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers.get('X-Line-Signature')
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return 'OK'
+
+# --- 1. 自動返信（一応残していますが、発言不要で個別送信可能になりました） ---
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))]
+                messages=[create_approval_card()]
             )
         )
 
@@ -165,8 +185,6 @@ def handle_postback(event):
 
         try:
             user_name = "保護者 様"
-            
-            # テキスト印鑑 ＆ LINEユーザーIDログの押印を実行
             add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name, line_user_id=user_id)
             
             download_url = f"https://line-stamp-bot-y4g2.onrender.com/files/{output_filename}"
