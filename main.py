@@ -100,11 +100,13 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
     stamp_color = (0.9, 0.1, 0.1)  # 朱色
 
+    # 四角い枠線を描画（互換性を高めた処理）
     shape = page.new_shape()
-    shape.draw_round_rect(rect, 4)
+    shape.draw_rect(rect)
     shape.finish(color=stamp_color, width=1.5)
     shape.commit()
 
+    # 「【 承 認 】」の文字を入れる
     page.insert_textbox(
         rect,
         "【 承 認 】",
