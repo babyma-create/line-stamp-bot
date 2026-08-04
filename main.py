@@ -71,7 +71,6 @@ def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
             client = gspread.authorize(creds)
             sheet = client.open_by_key(SPREADSHEET_ID).sheet1
             now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-            # 行を追記: 日時, LINE User ID, 表示名, ファイル名, ドライブ保管リンク
             sheet.append_row([now_str, user_id, user_name, filename, drive_link])
             
         return True
@@ -147,8 +146,8 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護�
     page_height = page.rect.height
     mm_to_pt = 2.83465
 
-    right_margin_pt = 20.0 * mm_to_pt  # 右から20mm
-    bottom_margin_pt = 3.0 * mm_to_pt  # 下から3mm
+    right_margin_pt = 20.0 * mm_to_pt
+    bottom_margin_pt = 3.0 * mm_to_pt
 
     stamp_width = 18.0 * mm_to_pt
     stamp_height = 10.0 * mm_to_pt
@@ -228,7 +227,7 @@ ADMIN_HTML = """
         .warn { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; font-size: 13px; margin-top: 10px; }
     </style>
     <script>
-        function confirmSend(e) {
+        function checkConfirm() {
             var select = document.getElementById("user_select");
             var selectedText = select.options[select.selectedIndex].text;
             var fileInput = document.getElementById("pdf_file");
@@ -236,16 +235,11 @@ ADMIN_HTML = """
 
             if (!select.value) {
                 alert("送信先の保護者を選択してください。");
-                if (e) e.preventDefault();
                 return false;
             }
 
-            var res = confirm("【送信前の最終確認】\n\n送信先保護者: " + selectedText + "\n添付ファイル: " + fileName + "\n\n間違いありませんか？送信を実行します。");
-            if (!res) {
-                if (e) e.preventDefault();
-                return false;
-            }
-            return true;
+            var result = confirm("【送信前の最終確認】\\n\\n送信先保護者: " + selectedText + "\\n添付ファイル: " + fileName + "\\n\\n間違いありませんか？送信を実行します。");
+            return result;
         }
         function updateUserId(val) {
             document.getElementById("user_id_input").value = val;
@@ -263,7 +257,7 @@ ADMIN_HTML = """
             ⚠️ <strong>誤送信防止機能：</strong> 送信前に宛先保護者様とお子様名、添付PDF名をポップアップで確認します。
         </div>
 
-        <form method="POST" enctype="multipart/form-data" onsubmit="return confirmSend(event);">
+        <form method="POST" enctype="multipart/form-data" onsubmit="return checkConfirm();">
             <label>① 送信先の保護者様を選択</label>
             <select id="user_select" onchange="updateUserId(this.value);" required>
                 <option value="">-- 送信先の保護者を選択してください --</option>
