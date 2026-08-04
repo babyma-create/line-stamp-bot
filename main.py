@@ -407,6 +407,7 @@ def handle_file(event):
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_id = event.source.user_id
+    user_text = event.message.text.strip()
     
     display_name = ""
     try:
@@ -418,8 +419,23 @@ def handle_message(event):
     except:
         pass
 
-    # メッセージが来たら自動でLINE IDと表示名をスプレッドシートに保存
-    save_user_id(user_id, display_name)
+    # 名前として受け取るテキスト（送られたテキスト優先、なければLINE表示名）
+    saved_name = user_text if user_text else (display_name or "保護者")
+
+    # スプレッドシートに登録・更新
+    save_user_id(user_id, saved_name)
+
+    # 登録完了の自動返信（これで既読がつき、返信が届きます！）
+    reply_text = f"ご連絡ありがとうございます！\n保護者様（お名前: {saved_name}）として登録いたしました。"
+    
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)]
+            )
+        )
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
