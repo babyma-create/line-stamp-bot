@@ -53,28 +53,28 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
         align=fitz.TEXT_ALIGN_CENTER
     )
 
-    # 3. 枠の外（下側）に詳細情報 ＆ LINEログ（ユーザーID）を印字
+    # 3. 枠の外（下側）に詳細情報 ＆ LINEログ（1行ずつ安全に描画）
     now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
     
-    # ログ情報テキスト（文字数を考慮して少し小さめのフォントで表示）
-    info_text = f"承認者: {user_name}\n確認日: {now_str}\nLINE ID: {line_user_id}"
-    
-    # 枠の下から空けた位置を指定
-    info_rect = fitz.Rect(
-        STAMP_X - 40, 
-        STAMP_Y + HEIGHT + 4, 
-        STAMP_X + WIDTH + 60, 
-        STAMP_Y + HEIGHT + 45
-    )
-    
-    page.insert_textbox(
-        info_rect,
-        info_text,
-        fontsize=6.5,
-        fontname="japan",
-        color=(0.2, 0.2, 0.2),  # 枠外の文字はダークグレー
-        align=fitz.TEXT_ALIGN_LEFT
-    )
+    start_x = STAMP_X - 30
+    start_y = STAMP_Y + HEIGHT + 12
+    line_height = 9.0  # 行間
+
+    lines = [
+        f"承認者: {user_name}",
+        f"確認日: {now_str}",
+        f"LINE ID: {line_user_id}"
+    ]
+
+    for i, line in enumerate(lines):
+        point = fitz.Point(start_x, start_y + (i * line_height))
+        page.insert_text(
+            point,
+            line,
+            fontsize=6.5,
+            fontname="japan",
+            color=(0.2, 0.2, 0.2)  # ダークグレー
+        )
 
     doc.save(output_pdf_path)
     doc.close()
