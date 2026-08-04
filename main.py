@@ -17,19 +17,67 @@ from linebot.v3.messaging import (
     FlexContainer
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageContent, PostbackEvent
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 app = Flask(__name__)
 
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID')
+SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
 
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
 USER_LIST_FILE = "/tmp/user_list.json"
-
-# 日本時間（JST）の定義
 JST = timezone(timedelta(hours=9))
+
+# --- Google ドライブへのPDFアップロード＆スプレッドシートログ記録 ---
+def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
+    if not SERVICE_ACCOUNT_JSON:
+        print("GOOGLE_SERVICE_ACCOUNT_JSONの設定が不足しています。")
+        return False
+        
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        
+        drive_link = ""
+        # 1. Google ドライブへPDFを自動アップロード
+        if DRIVE_FOLDER_ID:
+            drive_service = build('drive', 'v3', credentials=creds)
+            file_metadata = {
+                'name': f"承認済み_{user_name}_{filename}",
+                'parents': [DRIVE_FOLDER_ID]
+            }
+            media = MediaFileUpload(local_pdf_path, mimetype='application/pdf')
+            uploaded_file = drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, webViewLink'
+            ).execute()
+            drive_link = uploaded_file.get('webViewLink', '')
+
+        # 2. スプレッドシートへログ記録
+        if SPREADSHEET_ID:
+            client = gspread.authorize(creds)
+            sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+            now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            # 行を追記: 日時, LINE User ID, 表示名, ファイル名, ドライブ保管リンク
+            sheet.append_row([now_str, user_id, user_name, filename, drive_link])
+            
+        return True
+    except Exception as e:
+        print(f"ログ・ドライブ保存エラー: {str(e)}")
+        return False
 
 def get_user_list():
     if os.path.exists(USER_LIST_FILE):
@@ -40,14 +88,15 @@ def get_user_list():
             return {}
     return {}
 
-def save_user_id(user_id):
+def save_user_id(user_id, display_name=""):
     users = get_user_list()
-    if user_id not in users:
-        users[user_id] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-        with open(USER_LIST_FILE, "w") as f:
-            json.dump(users, f)
+    users[user_id] = {
+        "last_seen": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+        "name": display_name or users.get(user_id, {}).get("name", "未設定")
+    }
+    with open(USER_LIST_FILE, "w") as f:
+        json.dump(users, f, ensure_ascii=False)
 
-# --- 確認カード（Flex Message）の共通データ作成 ---
 def create_approval_card():
     flex_json = {
       "type": "bubble",
@@ -90,69 +139,53 @@ def create_approval_card():
     }
     return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
-# --- テキスト印鑑 ＆ 枠外ログ印字処理 ---
-def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認"):
+def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="保護者"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
 
-    # ページの高さと幅を取得（単位: ポイント）
     page_width = page.rect.width
     page_height = page.rect.height
-
-    # 単位換算: 1mm ≒ 2.83465 pt
     mm_to_pt = 2.83465
 
-    # 右端から 20mm (2.0cm)、下から 3mm の位置を計算
-    right_margin_pt = 20.0 * mm_to_pt  # 右端から20mm（5mm + 15mm左ずらし）
+    right_margin_pt = 20.0 * mm_to_pt  # 右から20mm
     bottom_margin_pt = 3.0 * mm_to_pt  # 下から3mm
 
-    # 朱色枠のサイズ（幅約18mm、高さ約10mm）
     stamp_width = 18.0 * mm_to_pt
     stamp_height = 10.0 * mm_to_pt
+    date_area_width = 65.0
 
-    # 日付テキストの幅用エリア
-    date_area_width = 45.0
-
-    # 枠の左上X・Y座標（PDF座標系は左上が原点）
     STAMP_X = page_width - right_margin_pt - stamp_width - date_area_width
     STAMP_Y = page_height - bottom_margin_pt - stamp_height
 
     rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + stamp_width, STAMP_Y + stamp_height)
-    stamp_color = (0.9, 0.1, 0.1)  # 朱色
+    stamp_color = (0.9, 0.1, 0.1)
 
-    # 四角い枠線を描画
     shape = page.new_shape()
     shape.draw_rect(rect)
     shape.finish(color=stamp_color, width=1.5)
     shape.commit()
 
-    # 表示名から苗字のみを抽出
-    clean_name = user_name.replace(" 様", "").replace("様", "").strip()
-    family_name = clean_name.split()[0].split(" ")[0] if clean_name else "承認"
-
-    # 朱色枠の中に苗字のみを配置（枠内ぴったりに収める設定）
     page.insert_textbox(
         rect,
-        family_name,
-        fontsize=10.0,
+        "【 承 認 】",
+        fontsize=8.0,
         fontname="japan",
         color=stamp_color,
         align=fitz.TEXT_ALIGN_CENTER
     )
 
-    # 日本時間（JST）を取得
     now = datetime.now(JST)
     date_str = now.strftime("%Y/%m/%d")
     time_str = now.strftime("%H:%M")
 
-    # 枠の右側に「日付」と「時間」のみを配置
     start_x = STAMP_X + stamp_width + 4.0
-    start_y = STAMP_Y + 2.0
-    line_height = 9.0
+    start_y = STAMP_Y + 1.0
+    line_height = 8.0
 
     lines = [
         f"{date_str}",
-        f"{time_str}"
+        f"{time_str}",
+        f"{user_name}"
     ]
 
     for i, line in enumerate(lines):
@@ -160,7 +193,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認")
         page.insert_text(
             point,
             line,
-            fontsize=6.5,
+            fontsize=6.0,
             fontname="japan",
             color=(0.3, 0.3, 0.3)
         )
@@ -172,12 +205,10 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認")
 def index():
     return "OK", 200
 
-# 押印済みPDF・公開PDFのダウンロード用URL
 @app.route("/files/<filename>", methods=['GET'])
 def download_file(filename):
     return send_from_directory("/tmp", filename)
 
-# --- 👑 管理者専用送信ページ ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -186,7 +217,7 @@ ADMIN_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>管理者用 送信画面</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; max-width: 500px; margin: auto; background: #f4f7f6; }
+        body { font-family: sans-serif; padding: 20px; max-width: 550px; margin: auto; background: #f4f7f6; }
         .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
         h2 { color: #333; margin-top: 0; }
         label { font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; }
@@ -194,29 +225,52 @@ ADMIN_HTML = """
         button { background: #00B900; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; font-weight: bold; font-size: 16px; margin-top: 20px; cursor: pointer; }
         button:hover { background: #009900; }
         .msg { margin-top: 15px; padding: 10px; background: #e2f0d9; border: 1px solid #b2d8a0; border-radius: 5px; color: #2d572c; }
+        .warn { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; font-size: 13px; margin-top: 10px; }
     </style>
+    <script>
+        function confirmSend() {
+            var select = document.getElementById("user_select");
+            var selectedText = select.options[select.selectedIndex].text;
+            var fileInput = document.getElementById("pdf_file");
+            var fileName = fileInput.files[0] ? fileInput.files[0].name : "未選択";
+
+            if (!select.value) {
+                alert("送信先の保護者を選択してください。");
+                return false;
+            }
+            return confirm("【送信前の最終確認】\\n\\n送信先保護者: " + selectedText + "\\n添付ファイル: " + fileName + "\\n\\n間違いありませんか？送信を実行します。");
+        }
+        function updateUserId(val) {
+            document.getElementById("user_id_input").value = val;
+        }
+    </script>
 </head>
 <body>
     <div class="card">
-        <h2>📄 PDF・承諾カード送信</h2>
+        <h2>📄 PDF・承諾カード送信（保護者用）</h2>
         {% if msg %}
             <div class="msg">{{ msg }}</div>
         {% endif %}
-        <form method="POST" enctype="multipart/form-data">
-            <label>送信先の LINE User ID</label>
-            <input type="text" name="user_id" placeholder="U1234567890abcdef..." required>
-            <small style="color:#666;">※受信履歴のあるユーザーIDリスト：</small>
-            <select onchange="this.previousElementSibling.previousElementSibling.value=this.value;">
-                <option value="">-- 選択してください --</option>
-                {% for uid, time in users.items() %}
-                    <option value="{{ uid }}">{{ uid }} ({{ time }})</option>
+        
+        <div class="warn">
+            ⚠️ <strong>誤送信防止機能：</strong> 送信前に宛先保護者様とお子様名、添付PDF名をポップアップで確認します。
+        </div>
+
+        <form method="POST" enctype="multipart/form-data" onsubmit="return confirmSend();">
+            <label>① 送信先の保護者様を選択</label>
+            <select id="user_select" onchange="updateUserId(this.value);" required>
+                <option value="">-- 送信先の保護者を選択してください --</option>
+                {% for uid, info in users.items() %}
+                    <option value="{{ uid }}">{{ info.name }} 様 (ID: {{ uid[:8] }}... / 最終アクセス: {{ info.last_seen }})</option>
                 {% endfor %}
             </select>
 
-            <label>送付するPDFファイル</label>
-            <input type="file" name="pdf_file" accept=".pdf" required>
+            <input type="hidden" name="user_id" id="user_id_input" required>
 
-            <button type="submit">送信（PDF＋確認カード）</button>
+            <label>② 送付するPDFファイルを選択</label>
+            <input type="file" name="pdf_file" id="pdf_file" accept=".pdf" required>
+
+            <button type="submit">送信実行（確認後に送信）</button>
         </form>
     </div>
 </body>
@@ -240,9 +294,7 @@ def admin_page():
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 
-                # 1. PDFリンクメッセージ送付
                 text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
-                # 2. 承諾カード送付
                 card_msg = create_approval_card()
 
                 try:
@@ -252,7 +304,7 @@ def admin_page():
                             messages=[text_msg, card_msg]
                         )
                     )
-                    msg = "✅ 送信完了しました！PDFと承諾カードが届きました。"
+                    msg = "✅ 送信完了しました！保護者様へPDFと承諾カードが届きました。"
                 except Exception as e:
                     msg = f"❌ 送信エラー: {str(e)}"
 
@@ -271,7 +323,6 @@ def callback():
 
     return 'OK'
 
-# --- 1. ファイル（PDF）を受信した時の処理 ---
 @handler.add(MessageEvent, message=FileMessageContent)
 def handle_file(event):
     message_id = event.message.id
@@ -285,12 +336,22 @@ def handle_file(event):
         with open(save_path, 'wb') as f:
             f.write(content)
 
-# --- 2. テキストメッセージを受信した時の処理 ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_id = event.source.user_id
-    save_user_id(user_id)
     user_msg = event.message.text.strip()
+    
+    display_name = ""
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            profile = line_bot_api.get_profile(user_id)
+            if profile:
+                display_name = profile.display_name
+    except:
+        pass
+
+    save_user_id(user_id, display_name)
     
     if "出席内容" in user_msg:
         reply_obj = create_approval_card()
@@ -308,14 +369,12 @@ def handle_message(event):
             )
         )
 
-# --- 3. 「承諾する」ボタンが押された時の処理 ---
 @handler.add(PostbackEvent)
 def handle_postback(event):
     data = event.postback.data
 
     if data == "action=approve":
         user_id = event.source.user_id
-        save_user_id(user_id)
         input_pdf = f"/tmp/latest_{user_id}.pdf"
         
         if not os.path.exists(input_pdf):
@@ -324,8 +383,7 @@ def handle_postback(event):
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
 
-        # ユーザーのLINE表示名を取得する処理
-        user_name = "承認"
+        user_name = "保護者"
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
@@ -335,8 +393,14 @@ def handle_postback(event):
         except Exception:
             pass
 
+        save_user_id(user_id, user_name)
+
         try:
+            # 1. 印鑑（【 承 認 】）＆ 枠外3行ログの挿入処理
             add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name)
+            
+            # 2. 改ざん防止用：Googleドライブ保存＆スプレッドシートログ記録
+            log_approval_and_upload_pdf(user_id, user_name, output_pdf, output_filename)
             
             host_url = request.host_url.rstrip('/')
             download_url = f"{host_url}/files/{output_filename}"
