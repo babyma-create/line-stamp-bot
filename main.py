@@ -36,6 +36,93 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 USER_LIST_FILE = "/tmp/user_list.json"
 JST = timezone(timedelta(hours=9))
 
+def get_gspread_client():
+    if not SERVICE_ACCOUNT_JSON or not SPREADSHEET_ID:
+        return None
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f"Gspread Auth Error: {e}")
+        return None
+
+# --- スプレッドシートへユーザーリストを読み書き（永久保存） ---
+def get_user_list():
+    users = {}
+    # 1. まずローカルファイルを読み込み
+    if os.path.exists(USER_LIST_FILE):
+        try:
+            with open(USER_LIST_FILE, "r") as f:
+                users = json.load(f)
+        except:
+            users = {}
+
+    # 2. スプレッドシートの Users シートから復元
+    client = get_gspread_client()
+    if client:
+        try:
+            sh = client.open_by_key(SPREADSHEET_ID)
+            try:
+                sheet = sh.worksheet("Users")
+            except:
+                sheet = sh.add_worksheet(title="Users", rows=100, cols=5)
+                sheet.append_row(["User_ID", "Name", "Last_Seen"])
+
+            records = sheet.get_all_records()
+            for r in records:
+                uid = str(r.get("User_ID", "")).strip()
+                if uid:
+                    users[uid] = {
+                        "name": r.get("Name", "保護者"),
+                        "last_seen": r.get("Last_Seen", "")
+                    }
+        except Exception as e:
+            print(f"User list fetch from sheet error: {e}")
+
+    return users
+
+def save_user_id(user_id, display_name=""):
+    users = get_user_list()
+    now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    name = display_name or users.get(user_id, {}).get("name", "保護者")
+    
+    users[user_id] = {
+        "last_seen": now_str,
+        "name": name
+    }
+
+    # ローカル保存
+    try:
+        with open(USER_LIST_FILE, "w") as f:
+            json.dump(users, f, ensure_ascii=False)
+    except:
+        pass
+
+    # スプレッドシート保存
+    client = get_gspread_client()
+    if client:
+        try:
+            sh = client.open_by_key(SPREADSHEET_ID)
+            try:
+                sheet = sh.worksheet("Users")
+            except:
+                sheet = sh.add_worksheet(title="Users", rows=100, cols=5)
+                sheet.append_row(["User_ID", "Name", "Last_Seen"])
+
+            cell = sheet.find(user_id)
+            if cell:
+                sheet.update_cell(cell.row, 2, name)
+                sheet.update_cell(cell.row, 3, now_str)
+            else:
+                sheet.append_row([user_id, name, now_str])
+        except Exception as e:
+            print(f"User save to sheet error: {e}")
+
 # --- Google ドライブへのPDFアップロード＆スプレッドシートログ記録 ---
 def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
     if not SERVICE_ACCOUNT_JSON:
@@ -77,24 +164,6 @@ def log_approval_and_upload_pdf(user_id, user_name, local_pdf_path, filename):
     except Exception as e:
         print(f"ログ・ドライブ保存エラー: {str(e)}")
         return False
-
-def get_user_list():
-    if os.path.exists(USER_LIST_FILE):
-        try:
-            with open(USER_LIST_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_user_id(user_id, display_name=""):
-    users = get_user_list()
-    users[user_id] = {
-        "last_seen": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
-        "name": display_name or users.get(user_id, {}).get("name", "未設定")
-    }
-    with open(USER_LIST_FILE, "w") as f:
-        json.dump(users, f, ensure_ascii=False)
 
 def create_approval_card():
     flex_json = {
