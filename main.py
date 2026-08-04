@@ -1,8 +1,7 @@
 import os
 import json
 import fitz  # PyMuPDF
-from datetime import datetime
-import pytz
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, send_from_directory, render_template_string
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -29,6 +28,9 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
 USER_LIST_FILE = "/tmp/user_list.json"
 
+# 日本時間（JST）の定義
+JST = timezone(timedelta(hours=9))
+
 def get_user_list():
     if os.path.exists(USER_LIST_FILE):
         try:
@@ -41,8 +43,7 @@ def get_user_list():
 def save_user_id(user_id):
     users = get_user_list()
     if user_id not in users:
-        jst = pytz.timezone('Asia/Tokyo')
-        users[user_id] = datetime.now(jst).strftime("%Y-%m-%d %H:%M:%S")
+        users[user_id] = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
         with open(USER_LIST_FILE, "w") as f:
             json.dump(users, f)
 
@@ -120,8 +121,7 @@ def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認�
     )
 
     # 日本時間（JST）を取得
-    jst = pytz.timezone('Asia/Tokyo')
-    now = datetime.now(jst)
+    now = datetime.now(JST)
     date_str = now.strftime("%Y/%m/%d")
     time_str = now.strftime("%H:%M")
 
