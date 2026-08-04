@@ -23,26 +23,57 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
-# --- 自動押印処理 ---
-def add_final_stamp(input_pdf_path, output_pdf_path, stamp_image_path="sample_stamp.png"):
-    STAMP_X = 480.0
-    STAMP_Y = 750.0
-    STAMP_SIZE = 35.0
-
+# --- テキスト印鑑 ＆ 枠外ログ印字処理 ---
+def add_text_stamp_with_log(input_pdf_path, output_pdf_path, user_name="承認者", line_user_id=""):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
+
+    # 印鑑枠の位置設定（X座標, Y座標, 幅, 高さ）
+    STAMP_X = 450.0
+    STAMP_Y = 700.0
+    WIDTH = 70.0
+    HEIGHT = 32.0
+
+    rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + WIDTH, STAMP_Y + HEIGHT)
+    stamp_color = (0.9, 0.1, 0.1)  # 朱色
+
+    # 1. 赤い角丸枠を描画
+    shape = page.new_shape()
+    shape.draw_round_rect(rect, 4)
+    shape.finish(color=stamp_color, width=1.5)
+    shape.commit()
+
+    # 2. 枠内の文字（【承認】）
+    page.insert_textbox(
+        rect,
+        "【 承 認 】",
+        fontsize=9,
+        fontname="japan",
+        color=stamp_color,
+        align=fitz.TEXT_ALIGN_CENTER
+    )
+
+    # 3. 枠の外（下側）に詳細情報 ＆ LINEログ（ユーザーID）を印字
+    now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
     
-    # 1. 印鑑の配置
-    stamp_rect = fitz.Rect(STAMP_X, STAMP_Y, STAMP_X + STAMP_SIZE, STAMP_Y + STAMP_SIZE)
-    page.insert_image(stamp_rect, filename=stamp_image_path)
+    # ログ情報テキスト（文字数を考慮して少し小さめのフォントで表示）
+    info_text = f"承認者: {user_name}\n確認日: {now_str}\nLINE ID: {line_user_id}"
     
-    # 2. 確認日時の印字
-    now_str = datetime.now().strftime("確認日: %Y/%m/%d %H:%M")
-    page.insert_text(
-        fitz.Point(STAMP_X - 10, STAMP_Y + STAMP_SIZE + 10),
-        now_str,
-        fontsize=8,
-        color=(0.2, 0.2, 0.2)
+    # 枠の下から空けた位置を指定
+    info_rect = fitz.Rect(
+        STAMP_X - 40, 
+        STAMP_Y + HEIGHT + 4, 
+        STAMP_X + WIDTH + 60, 
+        STAMP_Y + HEIGHT + 45
+    )
+    
+    page.insert_textbox(
+        info_rect,
+        info_text,
+        fontsize=6.5,
+        fontname="japan",
+        color=(0.2, 0.2, 0.2),  # 枠外の文字はダークグレー
+        align=fitz.TEXT_ALIGN_LEFT
     )
 
     doc.save(output_pdf_path)
@@ -69,13 +100,9 @@ def callback():
 
     return 'OK'
 
-# --- 1. テキスト（メッセージ）を受信した時の処理 ---
+# --- 1. メッセージを受信した時の処理 ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    user_text = event.message.text
-
-    # 「確認」や「案内」といったキーワードが来たら承認ボタンカードを送る
-    # （またはどのメッセージに対しても案内カードを返す設定にできます）
     flex_json = {
       "type": "bubble",
       "body": {
@@ -84,7 +111,7 @@ def handle_message(event):
         "contents": [
           {
             "type": "text",
-            "text": "📄 書類確認・承諾のお願い",
+            "text": "📄 出席・確認のお願い",
             "weight": "bold",
             "size": "md"
           },
@@ -125,22 +152,25 @@ def handle_message(event):
             )
         )
 
-# --- 2. 「承諾する」ボタン（Postback）が押された時の処理 ---
+# --- 2. 「承諾する」ボタンが押された時の処理 ---
 @handler.add(PostbackEvent)
 def handle_postback(event):
     data = event.postback.data
 
     if data == "action=approve":
-        input_pdf = "sample_record.pdf"  # 元となる対象PDF（事前にリポジトリに配置）
-        output_filename = f"stamped_{event.source.user_id}.pdf"
+        input_pdf = "sample_record.pdf"
+        user_id = event.source.user_id
+        output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
 
         try:
-            # 押印実行
-            add_final_stamp(input_pdf, output_pdf, "sample_stamp.png")
+            user_name = "保護者 様"
+            
+            # テキスト印鑑 ＆ LINEユーザーIDログの押印を実行
+            add_text_stamp_with_log(input_pdf, output_pdf, user_name=user_name, line_user_id=user_id)
             
             download_url = f"https://line-stamp-bot-y4g2.onrender.com/files/{output_filename}"
-            reply_text = f"ご承諾ありがとうございます！\n自動押印が完了しました。\n\n【押印済みPDFの確認URL】\n{download_url}"
+            reply_text = f"ご承諾ありがとうございます！\n自動押印（電子承認）が完了しました。\n\n【押印済みPDFの確認URL】\n{download_url}"
 
         except Exception as e:
             reply_text = f"押印処理中にエラーが発生しました: {str(e)}"
