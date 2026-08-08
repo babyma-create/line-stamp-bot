@@ -21,6 +21,25 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 JST = timezone(timedelta(hours=9))
 
+# 最後に話しかけてきたユーザーのIDを一時保存するファイル
+LAST_USER_FILE = "/tmp/last_user_id.txt"
+
+def save_last_user(user_id):
+    try:
+        with open(LAST_USER_FILE, "w") as f:
+            f.write(user_id)
+    except Exception:
+        pass
+
+def get_last_user():
+    try:
+        if os.path.exists(LAST_USER_FILE):
+            with open(LAST_USER_FILE, "r") as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return ""
+
 def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
@@ -93,24 +112,12 @@ ADMIN_HTML = """
         .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
         h2 { color: #333; margin-top: 0; }
         label { font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; }
-        input[type="text"], input[type="file"] { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; background: #fafafa; }
         button { background: #00B900; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; font-weight: bold; font-size: 16px; margin-top: 20px; cursor: pointer; }
         button:hover { background: #009900; }
         .msg { margin-top: 15px; padding: 10px; background: #e2f0d9; border: 1px solid #b2d8a0; border-radius: 5px; color: #2d572c; }
         .warn { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; font-size: 13px; margin-top: 10px; }
     </style>
-    <script>
-        function checkConfirm() {
-            var userId = document.getElementById("user_id").value;
-            var fileInput = document.getElementById("pdf_file");
-            var fileName = fileInput.files[0] ? fileInput.files[0].name : "未選択";
-            if (!userId) {
-                alert("送信先のLINEユーザーIDを入力してください。");
-                return false;
-            }
-            return confirm("【送信確認】\\n\\n宛先ID: " + userId + "\\n添付ファイル: " + fileName + "\\n\\n送信を実行しますか？");
-        }
-    </script>
 </head>
 <body>
     <div class="card">
@@ -119,11 +126,11 @@ ADMIN_HTML = """
             <div class="msg">{{ msg|safe }}</div>
         {% endif %}
         <div class="warn">
-            💡 <strong>使い方：</strong> 保護者のLINE User IDを入力し、PDFを選択して送信してください。
+            💡 <strong>使い方：</strong> 直近でLINEから話しかけてきたユーザーのIDが自動セットされます。PDFを選んで送信ボタンを押してください。
         </div>
-        <form method="POST" enctype="multipart/form-data" onsubmit="return checkConfirm();">
-            <label>① 送信先のLINE User ID</label>
-            <input type="text" name="user_id" id="user_id" placeholder="Uxxxxxxxx... (LINEのユーザーID)" required>
+        <form method="POST" enctype="multipart/form-data">
+            <label>① 送信先のLINE User ID （自動取得済み）</label>
+            <input type="text" name="user_id" id="user_id" value="{{ last_user }}" placeholder="LINEから何かメッセージを送ってください" required>
             
             <label>② 送付するPDFファイルを選択</label>
             <input type="file" name="pdf_file" id="pdf_file" accept=".pdf" required>
@@ -163,7 +170,8 @@ def admin_page():
             except Exception as e:
                 msg = f"❌ 送信エラー: {str(e)}"
                 
-    return render_template_string(ADMIN_HTML, msg=msg)
+    last_user = get_last_user()
+    return render_template_string(ADMIN_HTML, msg=msg, last_user=last_user)
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -175,28 +183,17 @@ def callback():
         abort(400)
     return 'OK'
 
-@handler.add(MessageEvent, message=FileMessageContent)
-def handle_file(event):
-    message_id = event.message.id
-    user_id = event.source.user_id
-    save_path = f"/tmp/latest_{user_id}.pdf"
-    
-    with ApiClient(configuration) as api_client:
-        line_bot_blob_api = MessagingApiBlob(api_client)
-        content = line_bot_blob_api.get_message_content(message_id)
-        with open(save_path, 'wb') as f:
-            f.write(content)
-
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    text = event.message.text.strip()
     user_id = event.source.user_id
+    save_last_user(user_id)  # ユーザーIDを自動記憶！
     
-    # 「承諾」というキーワードが送られてきたら自動押印して返す
+    text = event.message.text.strip()
+    
     if "承諾" in text:
         input_pdf = f"/tmp/latest_{user_id}.pdf"
         if not os.path.exists(input_pdf):
-            input_pdf = "sample_record.pdf" # フォールバック用
+            input_pdf = "sample_record.pdf"
             
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
@@ -237,7 +234,7 @@ def handle_message(event):
                     )
                 )
     else:
-        reply_text = "メッセージありがとうございます！管理者からPDFが届きましたら、内容をご確認の上「承諾」と返信してください。自動押印されたPDFを発行いたします。"
+        reply_text = "メッセージありがとうございます！IDを自動記憶しました。管理者画面からPDFを送信いたします。"
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
