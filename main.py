@@ -8,7 +8,7 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi, MessagingApiBlob,
-    ReplyMessageRequest, PushMessageRequest, TextMessage, FlexMessage, FlexContainer
+    ReplyMessageRequest, PushMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageContent, PostbackEvent
 
@@ -117,7 +117,7 @@ ADMIN_HTML = """
             <div class="msg">{{ msg|safe }}</div>
         {% endif %}
         <div class="warn">
-            💡 <strong>使い方：</strong> 保護者のLINE User ID（Uから始まるID）を入力し、PDFを選択して送信ボタンを押してください。PDFと承認ボタンが同時に送信されます。
+            💡 <strong>使い方：</strong> LINE User IDを入力し、PDFを選択して送信してください。安定したテキストメッセージで通知が届きます。
         </div>
         <form method="POST" enctype="multipart/form-data" onsubmit="return checkConfirm();">
             <label>① 送信先のLINE User ID</label>
@@ -147,72 +147,23 @@ def admin_page():
             host_url = request.host_url.rstrip('/')
             pdf_download_url = f"{host_url}/files/latest_{target_user_id}.pdf"
             
-            # 承認ボタン付きFlexメッセージの定義
-            flex_json = {
-                "type": "bubble",
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": "📄 出席・確認のお願い",
-                            "weight": "bold",
-                            "size": "md"
-                        },
-                        {
-                            "type": "text",
-                            "text": "添付されたPDFファイルをご確認の上、下のボタンを押してご承諾ください。",
-                            "size": "sm",
-                            "color": "#666666",
-                            "wrap": True,
-                            "margin": "md"
-                        },
-                        {
-                            "type": "button",
-                            "action": {
-                                "type": "uri",
-                                "label": "PDFを開いて確認する",
-                                "uri": pdf_download_url
-                            },
-                            "style": "link",
-                            "margin": "md"
-                        }
-                    ]
-                },
-                "footer": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "button",
-                            "action": {
-                                "type": "postback",
-                                "label": "承認する",
-                                "data": f"action=approve&user_id={target_user_id}"
-                            },
-                            "style": "primary",
-                            "color": "#00B900"
-                        }
-                    ]
-                }
-            }
-            
             try:
                 with ApiClient(configuration) as api_client:
                     line_bot_api = MessagingApi(api_client)
-                    text_msg = TextMessage(text="保護者様\n出席記録のPDFをお送りいたします。")
-                    flex_msg = FlexMessage(
-                        alt_text="出席・確認のお願い（PDFが届いています）",
-                        contents=FlexContainer.from_dict(flex_json)
+                    send_text = (
+                        f"保護者様\n"
+                        f"出席記録のPDFをお送りいたします。\n\n"
+                        f"【確認用PDF】\n{pdf_download_url}\n\n"
+                        f"※内容をご確認の上、このトークルームに「承諾」と返信してください。自動で押印済みPDFを発行いたします。"
                     )
+                    text_msg = TextMessage(text=send_text)
                     line_bot_api.push_message(
                         PushMessageRequest(
                             to=target_user_id,
-                            messages=[text_msg, flex_msg]
+                            messages=[text_msg]
                         )
                     )
-                msg = "✅ 送信完了しました！PDFと承認ボタンが届きます。"
+                msg = "✅ 送信完了しました！"
             except Exception as e:
                 msg = f"❌ 送信エラー: {str(e)}"
                 
@@ -228,12 +179,12 @@ def callback():
         abort(400)
     return 'OK'
 
-@handler.add(PostbackEvent)
-def handle_postback(event):
-    data = event.postback.data
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    text = event.message.text.strip()
     user_id = event.source.user_id
     
-    if "action=approve" in data:
+    if "承諾" in text:
         input_pdf = f"/tmp/latest_{user_id}.pdf"
         if not os.path.exists(input_pdf):
             input_pdf = "sample_record.pdf"
@@ -256,7 +207,7 @@ def handle_postback(event):
             
             host_url = request.url_root.rstrip('/')
             download_link = f"{host_url}/files/{output_filename}"
-            reply_text = f"✅ 押印ありがとうございます！\n自動押印と改ざん防止ロックが完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
+            reply_text = f"✅ 承諾ありがとうございます！\n自動押印と改ざん防止ロックが完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
             
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
@@ -276,6 +227,16 @@ def handle_postback(event):
                         messages=[TextMessage(text=error_text)]
                     )
                 )
+    else:
+        reply_text = "メッセージありがとうございます。内容をご確認の上「承諾」とご返信ください。"
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_text)]
+                )
+            )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
