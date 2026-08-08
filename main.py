@@ -8,7 +8,7 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi, MessagingApiBlob,
-    ReplyMessageRequest, PushMessageRequest, TextMessage, FlexMessage, FlexContainer
+    ReplyMessageRequest, PushMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageContent, PostbackEvent
 
@@ -20,27 +20,6 @@ CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 JST = timezone(timedelta(hours=9))
-
-def create_approval_card():
-    flex_json = {
-        "type": "bubble",
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {"type": "text", "text": "📄 出席・確認のお願い", "weight": "bold", "size": "md"},
-                {"type": "text", "text": "内容をご確認の上、問題がなければ下の「承諾する」ボタンを押してください。", "wrap": True, "size": "sm", "color": "#666666", "margin": "md"}
-            ]
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {"type": "button", "action": {"type": "postback", "label": "承諾する", "data": "action=approve"}, "style": "primary", "color": "#00B900"}
-            ]
-        }
-    }
-    return FlexMessage(alt_text="書類確認のお願い", contents=FlexContainer.from_dict(flex_json))
 
 def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     doc = fitz.open(input_pdf_path)
@@ -135,9 +114,9 @@ ADMIN_HTML = """
 </head>
 <body>
     <div class="card">
-        <h2>📄 PDF・承諾カード送信（管理画面）</h2>
+        <h2>📄 PDF送信・自動押印（管理画面）</h2>
         {% if msg %}
-            <div class="msg">{{ msg }}</div>
+            <div class="msg">{{ msg|safe }}</div>
         {% endif %}
         <div class="warn">
             💡 <strong>使い方：</strong> 保護者のLINE User IDを入力し、PDFを選択して送信してください。
@@ -173,12 +152,11 @@ def admin_page():
             try:
                 with ApiClient(configuration) as api_client:
                     line_bot_api = MessagingApi(api_client)
-                    text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
-                    card_msg = create_approval_card()
+                    text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【確認用PDF】\n{pdf_download_url}\n\n※内容を確認したら、このトークに「承諾」と返信してください。自動で押印済みPDFを発行いたします。")
                     line_bot_api.push_message(
                         PushMessageRequest(
                             to=target_user_id,
-                            messages=[text_msg, card_msg]
+                            messages=[text_msg]
                         )
                     )
                 msg = "✅ 送信完了しました！"
@@ -211,24 +189,14 @@ def handle_file(event):
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    reply_text = "メッセージありがとうございます！管理者から送られてきたPDFの「承諾する」ボタンを押すと、自動押印されたPDFがダウンロードできるようになります。"
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
-            )
-        )
-
-@handler.add(PostbackEvent)
-def handle_postback(event):
-    data = event.postback.data
-    if data == "action=approve":
-        user_id = event.source.user_id
+    text = event.message.text.strip()
+    user_id = event.source.user_id
+    
+    # 「承諾」というキーワードが送られてきたら自動押印して返す
+    if "承諾" in text:
         input_pdf = f"/tmp/latest_{user_id}.pdf"
         if not os.path.exists(input_pdf):
-            input_pdf = "sample_record.pdf"
+            input_pdf = "sample_record.pdf" # フォールバック用
             
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
@@ -246,7 +214,7 @@ def handle_postback(event):
         try:
             add_text_stamp(input_pdf, output_pdf, user_name=user_name)
             
-            host_url = request.host_url.rstrip('/')
+            host_url = request.url_root.rstrip('/')
             download_link = f"{host_url}/files/{output_filename}"
             reply_text = f"ご承諾ありがとうございます！\n自動押印と改ざん防止ロックが完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
             
@@ -268,6 +236,16 @@ def handle_postback(event):
                         messages=[TextMessage(text=error_text)]
                     )
                 )
+    else:
+        reply_text = "メッセージありがとうございます！管理者からPDFが届きましたら、内容をご確認の上「承諾」と返信してください。自動押印されたPDFを発行いたします。"
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_text)]
+                )
+            )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
