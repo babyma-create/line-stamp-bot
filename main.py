@@ -1,5 +1,6 @@
 import os
 import json
+import requests
 import fitz  # PyMuPDF
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort, send_from_directory, render_template_string
@@ -14,12 +15,32 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageCon
 app = Flask(__name__)
 
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+CHANNEL_ID = os.environ.get('LINE_CHANNEL_ID')
+CHANNEL_SECRET_VAL = os.environ.get('LINE_CHANNEL_SECRET')
 
 handler = WebhookHandler(CHANNEL_SECRET)
-configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
-
 JST = timezone(timedelta(hours=9))
+
+def get_channel_access_token():
+    """LINEのAPIから動的にアクセストークンを自動取得する（有効期限切れ対策）"""
+    url = "https://api.line.me/v2/oauth/accessToken"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": os.environ.get('LINE_CHANNEL_ID'),
+        "client_secret": os.environ.get('LINE_CHANNEL_SECRET')
+    }
+    response = requests.post(url, headers=headers, data=data)
+    if response.status_code == 200:
+        return response.json().get("access_token")
+    else:
+        raise Exception(f"Failed to get access token: {response.text}")
+
+def get_api_client():
+    """毎回最新の有効なアクセストークンを使ってAPIクライアントを生成する"""
+    token = get_channel_access_token()
+    configuration = Configuration(access_token=token)
+    return ApiClient(configuration)
 
 def create_approval_card():
     flex_json = {
@@ -28,36 +49,15 @@ def create_approval_card():
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {
-                    "type": "text",
-                    "text": "📄 出席・確認のお願い",
-                    "weight": "bold",
-                    "size": "md"
-                },
-                {
-                    "type": "text",
-                    "text": "内容をご確認の上、問題がなければ下の「承諾する」ボタンを押してください。",
-                    "wrap": True,
-                    "size": "sm",
-                    "color": "#666666",
-                    "margin": "md"
-                }
+                {"type": "text", "text": "📄 出席・確認のお願い", "weight": "bold", "size": "md"},
+                {"type": "text", "text": "内容をご確認の上、問題がなければ下の「承諾する」ボタンを押してください。", "wrap": True, "size": "sm", "color": "#666666", "margin": "md"}
             ]
         },
         "footer": {
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {
-                    "type": "button",
-                    "action": {
-                        "type": "postback",
-                        "label": "承諾する",
-                        "data": "action=approve"
-                    },
-                    "style": "primary",
-                    "color": "#00B900"
-                }
+                {"type": "button", "action": {"type": "postback", "label": "承諾する", "data": "action=approve"}, "style": "primary", "color": "#00B900"}
             ]
         }
     }
@@ -66,7 +66,6 @@ def create_approval_card():
 def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     doc = fitz.open(input_pdf_path)
     page = doc[0]
-    
     page_width = page.rect.width
     page_height = page.rect.height
     
@@ -75,7 +74,7 @@ def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     bottom_margin_pt = 3.0 * mm_to_pt
     stamp_width = 18.0 * mm_to_pt
     stamp_height = 10.0 * mm_to_pt
-    date_area_width = 65.0 
+    date_area_width = 65.0
     
     STAMP_X = page_width - right_margin_pt - stamp_width - date_area_width
     STAMP_Y = page_height - bottom_margin_pt - stamp_height
@@ -89,11 +88,8 @@ def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     shape.commit()
     
     page.insert_textbox(
-        rect,
-        "【 承 認 】",
-        fontsize=8.0,
-        fontname="japan",
-        color=stamp_color,
+        rect, "【 承 認 】",
+        fontsize=8.0, fontname="japan", color=stamp_color,
         align=fitz.TEXT_ALIGN_CENTER
     )
     
@@ -108,20 +104,13 @@ def add_text_stamp(input_pdf_path, output_pdf_path, user_name="保護者"):
     lines = [f"{date_str}", f"{time_str}", f"{user_name}"]
     for i, line in enumerate(lines):
         point = fitz.Point(start_x, start_y + (i * line_height))
-        page.insert_text(
-            point,
-            line,
-            fontsize=6.0,
-            fontname="japan",
-            color=(0.3, 0.3, 0.3)
-        )
+        page.insert_text(point, line, fontsize=6.0, fontname="japan", color=(0.3, 0.3, 0.3))
         
-    # 【改ざん防止】管理者もパスワードで解除できない最強のロック（閲覧と印刷のみ許可）
     permissions = fitz.PDF_PERM_ACCESSIBILITY | fitz.PDF_PERM_PRINT
     doc.save(
         output_pdf_path,
         encryption=fitz.PDF_ENCRYPT_AES_256,
-        owner_pw=None,  # パスワードなし = 管理者を含め誰も後から内容を書き換えられない
+        owner_pw=None,
         permissions=permissions
     )
     doc.close()
@@ -202,22 +191,21 @@ def admin_page():
             host_url = request.host_url.rstrip('/')
             pdf_download_url = f"{host_url}/files/latest_{target_user_id}.pdf"
             
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
-                card_msg = create_approval_card()
-                
-                try:
+            try:
+                with get_api_client() as api_client:
+                    line_bot_api = MessagingApi(api_client)
+                    text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
+                    card_msg = create_approval_card()
                     line_bot_api.push_message(
                         PushMessageRequest(
                             to=target_user_id,
                             messages=[text_msg, card_msg]
                         )
                     )
-                    msg = "✅ 送信完了しました！"
-                except Exception as e:
-                    msg = f"❌ 送信エラー: {str(e)}"
-                    
+                msg = "✅ 送信完了しました！"
+            except Exception as e:
+                msg = f"❌ 送信エラー: {str(e)}"
+                
     return render_template_string(ADMIN_HTML, msg=msg)
 
 @app.route("/callback", methods=['POST'])
@@ -236,7 +224,7 @@ def handle_file(event):
     user_id = event.source.user_id
     save_path = f"/tmp/latest_{user_id}.pdf"
     
-    with ApiClient(configuration) as api_client:
+    with get_api_client() as api_client:
         line_bot_blob_api = MessagingApiBlob(api_client)
         content = line_bot_blob_api.get_message_content(message_id)
         with open(save_path, 'wb') as f:
@@ -245,7 +233,7 @@ def handle_file(event):
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     reply_text = "メッセージありがとうございます！管理者から送られてきたPDFの「承諾する」ボタンを押すと、自動押印されたPDFがダウンロードできるようになります。"
-    with ApiClient(configuration) as api_client:
+    with get_api_client() as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
             ReplyMessageRequest(
@@ -265,10 +253,10 @@ def handle_postback(event):
             
         output_filename = f"stamped_{user_id}.pdf"
         output_pdf = f"/tmp/{output_filename}"
-        
         user_name = "保護者"
+        
         try:
-            with ApiClient(configuration) as api_client:
+            with get_api_client() as api_client:
                 line_bot_api = MessagingApi(api_client)
                 profile = line_bot_api.get_profile(user_id)
                 if profile and profile.display_name:
@@ -277,16 +265,13 @@ def handle_postback(event):
             pass
             
         try:
-            # 1. 承認スタンプと改ざん防止ロックを押す
             add_text_stamp(input_pdf, output_pdf, user_name=user_name)
             
-            # 2. ダウンロードリンクを生成して返信
             host_url = request.host_url.rstrip('/')
             download_link = f"{host_url}/files/{output_filename}"
-            
             reply_text = f"ご承諾ありがとうございます！\n自動押印と改ざん防止ロックが完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
             
-            with ApiClient(configuration) as api_client:
+            with get_api_client() as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
@@ -296,7 +281,7 @@ def handle_postback(event):
                 )
         except Exception as e:
             error_text = f"❌ 処理エラーが発生しました: {str(e)}"
-            with ApiClient(configuration) as api_client:
+            with get_api_client() as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
