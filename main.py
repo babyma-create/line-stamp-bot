@@ -14,33 +14,12 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, FileMessageCon
 
 app = Flask(__name__)
 
+CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-CHANNEL_ID = os.environ.get('LINE_CHANNEL_ID')
-CHANNEL_SECRET_VAL = os.environ.get('LINE_CHANNEL_SECRET')
 
+configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 JST = timezone(timedelta(hours=9))
-
-def get_channel_access_token():
-    """LINEのAPIから動的にアクセストークンを自動取得する（有効期限切れ対策）"""
-    url = "https://api.line.me/v2/oauth/accessToken"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": os.environ.get('LINE_CHANNEL_ID'),
-        "client_secret": os.environ.get('LINE_CHANNEL_SECRET')
-    }
-    response = requests.post(url, headers=headers, data=data)
-    if response.status_code == 200:
-        return response.json().get("access_token")
-    else:
-        raise Exception(f"Failed to get access token: {response.text}")
-
-def get_api_client():
-    """毎回最新の有効なアクセストークンを使ってAPIクライアントを生成する"""
-    token = get_channel_access_token()
-    configuration = Configuration(access_token=token)
-    return ApiClient(configuration)
 
 def create_approval_card():
     flex_json = {
@@ -192,7 +171,7 @@ def admin_page():
             pdf_download_url = f"{host_url}/files/latest_{target_user_id}.pdf"
             
             try:
-                with get_api_client() as api_client:
+                with ApiClient(configuration) as api_client:
                     line_bot_api = MessagingApi(api_client)
                     text_msg = TextMessage(text=f"保護者様\n出席記録のPDFをお送りいたします。\n下記よりご確認ください。\n\n【添付PDF】\n{pdf_download_url}")
                     card_msg = create_approval_card()
@@ -224,7 +203,7 @@ def handle_file(event):
     user_id = event.source.user_id
     save_path = f"/tmp/latest_{user_id}.pdf"
     
-    with get_api_client() as api_client:
+    with ApiClient(configuration) as api_client:
         line_bot_blob_api = MessagingApiBlob(api_client)
         content = line_bot_blob_api.get_message_content(message_id)
         with open(save_path, 'wb') as f:
@@ -233,7 +212,7 @@ def handle_file(event):
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     reply_text = "メッセージありがとうございます！管理者から送られてきたPDFの「承諾する」ボタンを押すと、自動押印されたPDFがダウンロードできるようになります。"
-    with get_api_client() as api_client:
+    with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
             ReplyMessageRequest(
@@ -256,7 +235,7 @@ def handle_postback(event):
         user_name = "保護者"
         
         try:
-            with get_api_client() as api_client:
+            with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 profile = line_bot_api.get_profile(user_id)
                 if profile and profile.display_name:
@@ -271,7 +250,7 @@ def handle_postback(event):
             download_link = f"{host_url}/files/{output_filename}"
             reply_text = f"ご承諾ありがとうございます！\n自動押印と改ざん防止ロックが完了しました。\n\n【承諾済みPDFのダウンロード】\n{download_link}"
             
-            with get_api_client() as api_client:
+            with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
@@ -281,7 +260,7 @@ def handle_postback(event):
                 )
         except Exception as e:
             error_text = f"❌ 処理エラーが発生しました: {str(e)}"
-            with get_api_client() as api_client:
+            with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
